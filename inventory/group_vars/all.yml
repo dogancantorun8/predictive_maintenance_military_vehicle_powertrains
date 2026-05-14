@@ -32,3 +32,13 @@ helm_version: v3.20.2
 # === MinIO Helm Chart ===
 minio_chart_version: "5.4.0"           # MinIO community chart (https://charts.min.io)
 minio_release_name: "minio"
+
+# === PostgreSQL ===
+mlops_namespace: mlops
+postgres_version: "16"
+postgres_image: "postgres:16-alpine"
+postgres_storage_size: 10Gi
+postgres_user: postgres
+postgres_databases:
+  - mlflow
+  - kfp

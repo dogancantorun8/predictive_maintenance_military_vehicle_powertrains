@@ -1,0 +1,198 @@
+---
+# playbooks/05-postgres.yml
+# Installs a single-instance PostgreSQL 16 server in the 'mlops' namespace.
+# Used as the metadata DB for MLflow (Model Registry, experiment tracking)
+# and as a backup metadata store for KFP.
+#
+# NOTE: For a thesis-scoped single-node deployment, a plain StatefulSet is
+# sufficient. Production-grade HA PostgreSQL (e.g. CloudNativePG operator)
+# is listed as Future Work.
+
+- name: Install PostgreSQL (single instance) for MLflow + KFP metadata
+  hosts: localhost
+  connection: local
+  become: true
+  vars_files:
+    - ../inventory/group_vars/all.yml
+    - ../inventory/group_vars/vault.yml
+
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+
+  tasks:
+    # --- 1. Namespace ---
+    - name: Create mlops namespace
+      kubernetes.core.k8s:
+        api_version: v1
+        kind: Namespace
+        name: "{{ mlops_namespace }}"
+        state: present
+
+    # --- 2. Secret with postgres admin password ---
+    - name: Create PostgreSQL admin Secret
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: postgres-credentials
+            namespace: "{{ mlops_namespace }}"
+          type: Opaque
+          stringData:
+            POSTGRES_USER: "{{ postgres_user }}"
+            POSTGRES_PASSWORD: "{{ vault_postgres_password }}"
+            POSTGRES_DB: "postgres"
+
+    # --- 3. ConfigMap with init script (creates mlflow + kfp databases) ---
+    - name: Read postgres init SQL file
+      slurp:
+        src: "{{ playbook_dir }}/../files/postgres/init-databases.sql"
+      register: pg_init_sql
+
+    - name: Create PostgreSQL init-script ConfigMap
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: postgres-init-scripts
+            namespace: "{{ mlops_namespace }}"
+          data:
+            init-databases.sql: "{{ pg_init_sql.content | b64decode }}"
+
+    # --- 4. PersistentVolumeClaim ---
+    - name: Create PostgreSQL PVC ({{ postgres_storage_size }})
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: PersistentVolumeClaim
+          metadata:
+            name: postgres-data
+            namespace: "{{ mlops_namespace }}"
+          spec:
+            accessModes:
+              - ReadWriteOnce
+            storageClassName: local-path
+            resources:
+              requests:
+                storage: "{{ postgres_storage_size }}"
+
+    # --- 5. StatefulSet ---
+    - name: Create PostgreSQL StatefulSet
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: apps/v1
+          kind: StatefulSet
+          metadata:
+            name: postgres
+            namespace: "{{ mlops_namespace }}"
+            labels:
+              app: postgres
+          spec:
+            serviceName: postgres
+            replicas: 1
+            selector:
+              matchLabels:
+                app: postgres
+            template:
+              metadata:
+                labels:
+                  app: postgres
+              spec:
+                containers:
+                  - name: postgres
+                    image: "{{ postgres_image }}"
+                    imagePullPolicy: IfNotPresent
+                    ports:
+                      - containerPort: 5432
+                        name: postgres
+                    envFrom:
+                      - secretRef:
+                          name: postgres-credentials
+                    env:
+                      - name: PGDATA
+                        value: /var/lib/postgresql/data/pgdata
+                    resources:
+                      requests:
+                        cpu: 100m
+                        memory: 256Mi
+                      limits:
+                        cpu: 1000m
+                        memory: 1Gi
+                    volumeMounts:
+                      - name: data
+                        mountPath: /var/lib/postgresql/data
+                      - name: init-scripts
+                        mountPath: /docker-entrypoint-initdb.d
+                    readinessProbe:
+                      exec:
+                        command: ["pg_isready", "-U", "postgres"]
+                      initialDelaySeconds: 10
+                      periodSeconds: 5
+                    livenessProbe:
+                      exec:
+                        command: ["pg_isready", "-U", "postgres"]
+                      initialDelaySeconds: 30
+                      periodSeconds: 10
+                volumes:
+                  - name: data
+                    persistentVolumeClaim:
+                      claimName: postgres-data
+                  - name: init-scripts
+                    configMap:
+                      name: postgres-init-scripts
+
+    # --- 6. Headless service for StatefulSet ---
+    - name: Create PostgreSQL Service
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: postgres
+            namespace: "{{ mlops_namespace }}"
+            labels:
+              app: postgres
+          spec:
+            type: ClusterIP
+            ports:
+              - port: 5432
+                targetPort: 5432
+                name: postgres
+            selector:
+              app: postgres
+
+    # --- 7. Wait for PostgreSQL pod to be Ready ---
+    - name: Wait for PostgreSQL pod to be Ready
+      shell: |
+        kubectl get pods -n {{ mlops_namespace }} -l app=postgres \
+          -o jsonpath='{.items[0].status.conditions[?(@.type=="Ready")].status}'
+      register: pg_ready
+      until: pg_ready.stdout == "True"
+      retries: 30
+      delay: 10
+      changed_when: false
+
+    # --- 8. Verify databases exist ---
+    - name: Verify mlflow and kfp databases exist
+      shell: |
+        kubectl exec -n {{ mlops_namespace }} postgres-0 -- \
+          psql -U postgres -tAc "SELECT datname FROM pg_database WHERE datname IN ('mlflow', 'kfp');"
+      register: pg_dbs
+      changed_when: false
+
+    - name: Display verification info
+      debug:
+        msg: |
+          PostgreSQL installed in namespace '{{ mlops_namespace }}'.
+          Service: postgres.{{ mlops_namespace }}.svc.cluster.local:5432
+          Admin user: {{ postgres_user }} (password in vault)
+          Databases found: {{ pg_dbs.stdout_lines | join(', ') }}
+
+          To connect manually:
+            kubectl exec -it -n {{ mlops_namespace }} postgres-0 -- psql -U postgres
