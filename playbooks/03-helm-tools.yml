@@ -15,6 +15,16 @@
     krew_version: "v0.4.4"
 
   tasks:
+    # --- 0. Python kubernetes library (required by kubernetes.core modules) ---
+    - name: Install python3-kubernetes library via pip
+      pip:
+        name:
+          - kubernetes
+          - pyyaml
+        extra_args: --break-system-packages
+        state: present
+
+
     # --- 1. Helm v3 ---
     - name: Check if Helm is already installed
       stat:

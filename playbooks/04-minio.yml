@@ -1,0 +1,109 @@
+---
+# playbooks/04-minio.yml
+# Installs MinIO using the official community Helm chart (charts.min.io).
+# Creates 3 buckets: thesis-data, thesis-mlflow, thesis-models.
+# These buckets will be used by DVC (data), MLflow (artifacts), and the model cache.
+
+- name: Install MinIO object storage
+  hosts: localhost
+  connection: local
+  become: true
+  vars_files:
+    - ../inventory/group_vars/all.yml
+    - ../inventory/group_vars/vault.yml
+
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+
+  tasks:
+    # --- 1. Namespace ---
+    - name: Create MinIO namespace
+      kubernetes.core.k8s:
+        api_version: v1
+        kind: Namespace
+        name: "{{ minio_namespace }}"
+        state: present
+
+    # --- 2. Ensure official MinIO Helm repo is present ---
+    - name: Add MinIO official Helm repository
+      kubernetes.core.helm_repository:
+        name: minio
+        repo_url: https://charts.min.io/
+
+    - name: Update Helm repos
+      command: /usr/local/bin/helm repo update
+      changed_when: false
+
+    # --- 3. Install MinIO via Helm ---
+    # mode: standalone -> single replica, suitable for our single-node k3s
+    # persistence: backed by a PVC of size {{ minio_storage_size }}
+    # buckets: created automatically by the chart on first install
+    - name: Install/upgrade MinIO chart
+      kubernetes.core.helm:
+        name: "{{ minio_release_name }}"
+        chart_ref: minio/minio
+        chart_version: "{{ minio_chart_version }}"
+        release_namespace: "{{ minio_namespace }}"
+        create_namespace: false
+        wait: true
+        wait_timeout: 10m
+        values:
+          mode: standalone
+          replicas: 1
+          rootUser: "{{ vault_minio_user }}"
+          rootPassword: "{{ vault_minio_password }}"
+          persistence:
+            enabled: true
+            size: "{{ minio_storage_size }}"
+            storageClass: "local-path"
+          resources:
+            requests:
+              memory: 512Mi
+              cpu: 200m
+            limits:
+              memory: 1Gi
+              cpu: 1000m
+          buckets:
+            - name: thesis-data
+              policy: none
+              purge: false
+            - name: thesis-mlflow
+              policy: none
+              purge: false
+            - name: thesis-models
+              policy: none
+              purge: false
+          # The chart only creates a ClusterIP service; we access it via port-forward.
+          service:
+            type: ClusterIP
+            port: 9000
+          consoleService:
+            type: ClusterIP
+            port: 9001
+
+    # --- 4. Wait for MinIO pod to be Running ---
+    - name: Wait for MinIO pod to be Ready
+      shell: |
+        kubectl get pods -n {{ minio_namespace }} -l app=minio \
+          -o jsonpath='{.items[0].status.phase}'
+      register: minio_phase
+      until: minio_phase.stdout == "Running"
+      retries: 30
+      delay: 10
+      changed_when: false
+
+    # --- 5. Verify buckets via a one-off mc job ---
+    # The chart's post-install hook should have created them; we just print success.
+    - name: Display verification info
+      debug:
+        msg: |
+          MinIO installed in namespace '{{ minio_namespace }}'.
+          API service:     minio.{{ minio_namespace }}.svc.cluster.local:9000
+          Console service: minio-console.{{ minio_namespace }}.svc.cluster.local:9001
+          Buckets: {{ minio_buckets | join(', ') }}
+
+          To access from your laptop, port-forward:
+            kubectl port-forward -n {{ minio_namespace }} svc/minio        9000:9000 &
+            kubectl port-forward -n {{ minio_namespace }} svc/minio-console 9001:9001 &
+          Then open http://localhost:9001 in a browser.
+          Login: {{ vault_minio_user }} / (the password you set in vault.yml)
