@@ -27,4 +27,4 @@ prometheus_stack_version: 65.0.0
 monitoring_namespace: monitoring
 
 # === Versions ===
-helm_version: v3.16.0
+helm_version: v3.20.2

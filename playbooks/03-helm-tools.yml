@@ -1,0 +1,159 @@
+---
+# playbooks/03-helm-tools.yml
+# Installs Helm v3, kustomize, krew (kubectl plugin manager) and useful plugins.
+# These tools are used by all subsequent playbooks.
+
+- name: Install Helm, kustomize and kubectl plugins
+  hosts: localhost
+  connection: local
+  become: true
+  vars_files:
+    - ../inventory/group_vars/all.yml
+
+  vars:
+    kustomize_version: "5.4.3"
+    krew_version: "v0.4.4"
+
+  tasks:
+    # --- 1. Helm v3 ---
+    - name: Check if Helm is already installed
+      stat:
+        path: /usr/local/bin/helm
+      register: helm_binary
+
+    - name: Get installed Helm version (if any)
+      shell: /usr/local/bin/helm version --short 2>/dev/null || echo "none"
+      register: helm_installed_version
+      changed_when: false
+      when: helm_binary.stat.exists
+
+    - name: Download Helm install script
+      get_url:
+        url: https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+        dest: /tmp/get-helm-3.sh
+        mode: '0755'
+      when: not helm_binary.stat.exists or
+            (helm_installed_version.stdout is defined and
+             helm_version not in helm_installed_version.stdout)
+
+    - name: Install Helm {{ helm_version }}
+      shell: |
+        DESIRED_VERSION={{ helm_version }} \
+        HELM_INSTALL_DIR=/usr/local/bin \
+        /tmp/get-helm-3.sh
+      when: not helm_binary.stat.exists or
+            (helm_installed_version.stdout is defined and
+             helm_version not in helm_installed_version.stdout)
+
+    - name: Verify Helm
+      command: /usr/local/bin/helm version --short
+      register: helm_check
+      changed_when: false
+
+    - name: Show Helm version
+      debug:
+        msg: "Helm installed: {{ helm_check.stdout }}"
+
+    # --- 2. Add common Helm repos (used in later playbooks) ---
+    - name: Add Bitnami Helm repo
+      kubernetes.core.helm_repository:
+        name: bitnami
+        repo_url: https://charts.bitnami.com/bitnami
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+
+    - name: Add prometheus-community Helm repo
+      kubernetes.core.helm_repository:
+        name: prometheus-community
+        repo_url: https://prometheus-community.github.io/helm-charts
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+
+    - name: Add community-charts (MLflow) Helm repo
+      kubernetes.core.helm_repository:
+        name: community-charts
+        repo_url: https://community-charts.github.io/helm-charts
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+
+    - name: Update Helm repos
+      command: /usr/local/bin/helm repo update
+      changed_when: false
+
+    # --- 3. kustomize (standalone binary) ---
+    - name: Check if kustomize is already installed
+      stat:
+        path: /usr/local/bin/kustomize
+      register: kustomize_binary
+
+    - name: Download kustomize {{ kustomize_version }}
+      unarchive:
+        src: "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv{{ kustomize_version }}/kustomize_v{{ kustomize_version }}_linux_amd64.tar.gz"
+        dest: /usr/local/bin/
+        remote_src: yes
+        mode: '0755'
+      when: not kustomize_binary.stat.exists
+
+    - name: Verify kustomize
+      command: /usr/local/bin/kustomize version
+      register: kustomize_check
+      changed_when: false
+
+    - name: Show kustomize version
+      debug:
+        msg: "kustomize installed: {{ kustomize_check.stdout }}"
+
+    # --- 4. krew (kubectl plugin manager) ---
+    - name: Check if krew is already installed
+      stat:
+        path: /root/.krew/bin/kubectl-krew
+      register: krew_binary
+
+    - name: Download krew install archive
+      get_url:
+        url: "https://github.com/kubernetes-sigs/krew/releases/download/{{ krew_version }}/krew-linux_amd64.tar.gz"
+        dest: /tmp/krew.tar.gz
+        mode: '0644'
+      when: not krew_binary.stat.exists
+
+    - name: Extract krew archive
+      unarchive:
+        src: /tmp/krew.tar.gz
+        dest: /tmp/
+        remote_src: yes
+      when: not krew_binary.stat.exists
+
+    - name: Install krew
+      shell: /tmp/krew-linux_amd64 install krew
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      when: not krew_binary.stat.exists
+
+    - name: Add krew bin to root's PATH in .bashrc
+      lineinfile:
+        path: /root/.bashrc
+        line: 'export PATH="${KREW_ROOT:-$HOME/.krew}/bin:$PATH"'
+        state: present
+        create: yes
+
+    # --- 5. Install useful kubectl plugins via krew ---
+    - name: Install kubectl plugins (kubectx, kubens, neat)
+      shell: |
+        export PATH="/root/.krew/bin:$PATH"
+        kubectl krew install ctx ns neat || true
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      args:
+        executable: /bin/bash
+      register: krew_plugins
+      changed_when: "'Installed plugin' in krew_plugins.stdout"
+
+    # --- 6. Final summary ---
+    - name: Display verification commands
+      debug:
+        msg: |
+          Tools installed. Verify manually:
+            helm version --short
+            kustomize version
+            kubectl krew list
+            helm repo list
