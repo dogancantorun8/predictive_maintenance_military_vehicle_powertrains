@@ -1,0 +1,59 @@
+---
+# playbooks/02-k3s.yml
+# Installs k3s single-node Kubernetes. Traefik and servicelb are disabled
+# (we use kubectl port-forward instead of an ingress controller).
+
+- name: Install k3s Kubernetes
+  hosts: localhost
+  connection: local
+  become: true
+  vars_files:
+    - ../inventory/group_vars/all.yml
+
+  tasks:
+    - name: Check if k3s is already installed
+      stat:
+        path: /usr/local/bin/k3s
+      register: k3s_binary
+
+    - name: Download k3s install script
+      get_url:
+        url: https://get.k3s.io
+        dest: /tmp/k3s-install.sh
+        mode: '0755'
+      when: not k3s_binary.stat.exists
+
+    - name: Install k3s with custom args
+      shell: |
+        INSTALL_K3S_VERSION={{ k3s_version }} \
+        INSTALL_K3S_EXEC="server \
+          --disable {{ k3s_disable }} \
+          --write-kubeconfig-mode 644 \
+          --node-name mlops-master" \
+        /tmp/k3s-install.sh
+      when: not k3s_binary.stat.exists
+
+    - name: Wait for k3s node to be Ready
+      shell: kubectl get nodes
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      register: k3s_ready
+      until: "'Ready' in k3s_ready.stdout"
+      retries: 30
+      delay: 5
+      changed_when: false
+
+    - name: Set KUBECONFIG in root's .bashrc (persistent)
+      lineinfile:
+        path: /root/.bashrc
+        line: 'export KUBECONFIG=/etc/rancher/k3s/k3s.yaml'
+        state: present
+        create: yes
+
+    - name: Display next step
+      debug:
+        msg: |
+          k3s installed successfully. Run:
+            export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+            kubectl get nodes
+            kubectl get pods -A

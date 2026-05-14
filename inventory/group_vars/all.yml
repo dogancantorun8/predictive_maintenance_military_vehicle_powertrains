@@ -1,0 +1,30 @@
+# === General ===
+thesis_user: root
+timezone: Europe/Berlin
+
+# === k3s ===
+k3s_version: v1.30.5+k3s1
+k3s_disable: "traefik,servicelb"     # Simplification: we use port-forward instead
+
+# === Storage ===
+minio_namespace: minio
+minio_storage_size: 50Gi              # CCX23 disk: 160 GB
+minio_buckets:
+  - thesis-data
+  - thesis-mlflow
+  - thesis-models
+
+# === KFP Standalone ===
+kfp_version: 2.3.0
+kfp_namespace: kubeflow
+
+# === MLflow ===
+mlflow_version: 2.18.0
+mlflow_namespace: mlops
+
+# === Monitoring ===
+prometheus_stack_version: 65.0.0
+monitoring_namespace: monitoring
+
+# === Versions ===
+helm_version: v3.16.0
