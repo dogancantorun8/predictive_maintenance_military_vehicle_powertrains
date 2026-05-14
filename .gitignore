@@ -1,0 +1,5 @@
+*.retry
+*.log
+__pycache__/
+.venv/
+inventory/group_vars/vault.yml
