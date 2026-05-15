@@ -1,29 +1,3 @@
-# === General ===
-thesis_user: root
-timezone: Europe/Berlin
-
-# === k3s ===
-k3s_version: v1.30.5+k3s1
-k3s_disable: "traefik,servicelb"     # Simplification: we use port-forward instead
-
-# === Storage ===
-minio_namespace: minio
-minio_storage_size: 50Gi              # CCX23 disk: 160 GB
-minio_buckets:
-  - thesis-data
-  - thesis-mlflow
-  - thesis-models
-
-# === KFP Standalone ===
-kfp_version: 2.15.0
-kfp_namespace: kubeflow
-
-# === MLflow ===
-mlflow_version: 2.18.0
-mlflow_namespace: mlops
-
-# === Monitoring ===
-prometheus_stack_version: 65.0.0
 monitoring_namespace: monitoring
 
 # === Versions ===
@@ -60,3 +34,16 @@ alertmanager_storage_size: 2Gi
 # === Evidently drift detection (set up after base stack is healthy) ===
 evidently_schedule: "0 * * * *"          # hourly
 evidently_image: "evidentlyai/evidently:0.4.33"
+
+# === Python development environment ===
+python_version: "3.12"
+venv_path: "/root/thesis-infra/.venv"
+
+# === Data (C-MAPSS) ===
+cmapss_url: "https://phm-datasets.s3.amazonaws.com/NASA/6.+Turbofan+Engine+Degradation+Simulation+Data+Set.zip"
+cmapss_data_dir: "/root/thesis-infra/data/raw/cmapss"
+cmapss_zip_sha256: ""                    # Hash check — will fill in after first download
+
+# === DVC ===
+dvc_remote_name: "minio-remote"
+dvc_remote_url: "s3://thesis-data/dvc"   # Subpath inside thesis-data bucket

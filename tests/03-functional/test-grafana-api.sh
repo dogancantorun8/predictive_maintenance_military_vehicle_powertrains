@@ -1,7 +1,4 @@
 #!/bin/bash
-# tests/03-functional/test-grafana-api.sh
-# Verifies Grafana is up, reachable, and has the Prometheus datasource registered.
-
 set -uo pipefail
 source "$(dirname "$0")/../_lib.sh"
 
@@ -14,23 +11,20 @@ fi
 
 GRAFANA_POD=$(kubectl get pod -n monitoring -l app.kubernetes.io/name=grafana \
   -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
-
 info "Using Grafana pod: $GRAFANA_POD"
 
-# Test 1: Grafana health endpoint
 HEALTH=$(kubectl exec -n monitoring "$GRAFANA_POD" -c grafana -- \
   wget -qO- http://localhost:3000/api/health 2>/dev/null || echo "fail")
 
-if echo "$HEALTH" | grep -q '"database":"ok"'; then
+if echo "$HEALTH" | grep -qE '"database"[[:space:]]*:[[:space:]]*"ok"'; then
   pass "Grafana /api/health returns database=ok"
 else
   fail "Grafana health check failed" "got: $HEALTH"
 fi
 
-# Test 2: Grafana frontend serves login page
 LOGIN_STATUS=$(kubectl exec -n monitoring "$GRAFANA_POD" -c grafana -- \
   wget -qO- --server-response http://localhost:3000/login 2>&1 \
-  | grep -c "HTTP/1.1 200")
+  | grep -c "HTTP/1.1 200" || true)
 
 if [ "$LOGIN_STATUS" -gt 0 ]; then
   pass "Grafana /login page serves HTTP 200"

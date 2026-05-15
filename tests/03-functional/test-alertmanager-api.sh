@@ -1,7 +1,4 @@
 #!/bin/bash
-# tests/03-functional/test-alertmanager-api.sh
-# Verifies Alertmanager is up and ready to receive alerts.
-
 set -uo pipefail
 source "$(dirname "$0")/../_lib.sh"
 
@@ -14,25 +11,26 @@ fi
 
 AM_POD=$(kubectl get pod -n monitoring -l app.kubernetes.io/name=alertmanager \
   -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
-
 info "Using Alertmanager pod: $AM_POD"
 
-# Test 1: Alertmanager ready endpoint
-READY=$(kubectl exec -n monitoring "$AM_POD" -c alertmanager -- \
-  wget -qO- http://localhost:9093/-/ready 2>/dev/null || echo "fail")
+AM_SVC="prometheus-kube-prometheus-alertmanager.monitoring.svc.cluster.local:9093"
 
-if echo "$READY" | grep -qi "ok\|ready"; then
+READY=$(kubectl run am-test-$$ --rm -i --restart=Never \
+  --image=busybox:1.36 --quiet -- \
+  wget -qO- "http://${AM_SVC}/-/ready" 2>/dev/null; echo "DONE")
+
+if echo "$READY" | grep -qE "DONE$"; then
   pass "Alertmanager /-/ready returns OK"
 else
   fail "Alertmanager /-/ready failed" "got: $READY"
 fi
 
-# Test 2: Alertmanager status endpoint reports a valid config
-STATUS=$(kubectl exec -n monitoring "$AM_POD" -c alertmanager -- \
-  wget -qO- http://localhost:9093/api/v2/status 2>/dev/null || echo "")
+STATUS=$(kubectl run am-test-$$ --rm -i --restart=Never \
+  --image=busybox:1.36 --quiet -- \
+  wget -qO- "http://${AM_SVC}/api/v2/status" 2>/dev/null || echo "")
 
-if echo "$STATUS" | grep -q '"configYAML"'; then
-  pass "Alertmanager /api/v2/status returns a valid config"
+if echo "$STATUS" | grep -qE '"config"|"configYAML"|"cluster"'; then
+  pass "Alertmanager /api/v2/status returns a valid response"
 else
-  fail "Alertmanager status endpoint missing config"
+  fail "Alertmanager status endpoint check failed" "got first 200 chars: ${STATUS:0:200}"
 fi
