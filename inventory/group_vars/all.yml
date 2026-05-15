@@ -49,3 +49,14 @@ mlflow_release_name: "mlflow"
 mlflow_bucket: "thesis-mlflow"
 mlflow_db_name: "mlflow"
 mlflow_db_user: "postgres"
+
+# === Monitoring stack (kube-prometheus-stack) ===
+prometheus_stack_version: "85.0.3"
+prometheus_retention: "5d"
+prometheus_storage_size: 10Gi
+grafana_storage_size: 5Gi
+alertmanager_storage_size: 2Gi
+
+# === Evidently drift detection (set up after base stack is healthy) ===
+evidently_schedule: "0 * * * *"          # hourly
+evidently_image: "evidentlyai/evidently:0.4.33"

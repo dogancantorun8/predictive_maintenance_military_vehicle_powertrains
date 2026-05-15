@@ -1,0 +1,129 @@
+# files/monitoring/kube-prometheus-stack-values.yaml
+# Tuned values for kube-prometheus-stack on single-node 16 GB RAM k3s.
+# Larger defaults reduced for thesis-scope deployment.
+
+# --- Prometheus ---
+prometheus:
+  prometheusSpec:
+    retention: "5d"
+    retentionSize: "8GB"
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: local-path
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 10Gi
+    resources:
+      requests:
+        cpu: 200m
+        memory: 512Mi
+      limits:
+        cpu: 1500m
+        memory: 2Gi
+    # Cluster-wide ServiceMonitor/PrometheusRule discovery (default is "only same release")
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+
+# --- Grafana ---
+grafana:
+  adminPassword: "PLACEHOLDER_OVERRIDDEN_BY_ANSIBLE"
+  persistence:
+    enabled: true
+    storageClassName: local-path
+    accessModes: ["ReadWriteOnce"]
+    size: 5Gi
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  service:
+    type: ClusterIP
+    port: 80
+  defaultDashboardsEnabled: true
+  sidecar:
+    dashboards:
+      enabled: true
+    datasources:
+      enabled: true
+
+# --- Alertmanager ---
+alertmanager:
+  alertmanagerSpec:
+    replicas: 1
+    retention: 120h
+    storage:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: local-path
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 2Gi
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 200m
+        memory: 256Mi
+    alertmanagerConfigSelector: {}
+    alertmanagerConfigNamespaceSelector: {}
+
+# --- Node exporter ---
+nodeExporter:
+  enabled: true
+
+prometheus-node-exporter:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 32Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
+# --- kube-state-metrics ---
+kube-state-metrics:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+# --- Prometheus Operator ---
+prometheusOperator:
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  admissionWebhooks:
+    enabled: true
+    patch:
+      enabled: true
+
+# --- k3s-specific: disable components that don't exist or aren't exposed ---
+kubeApiServer:
+  enabled: true
+kubeEtcd:
+  enabled: false        # k3s uses sqlite by default
+kubeProxy:
+  enabled: false        # k3s doesn't run kube-proxy as a separate component
+kubeScheduler:
+  enabled: false        # not exposed by k3s
+kubeControllerManager:
+  enabled: false        # not exposed by k3s
+
+# --- CRDs ---
+crds:
+  enabled: true
