@@ -1,0 +1,120 @@
+---
+# playbooks/06-kfp-standalone.yml
+# Installs Kubeflow Pipelines Standalone (platform-agnostic env, no cert-manager).
+#
+# Method: official kustomize manifests from github.com/kubeflow/pipelines.
+# Two stages:
+#   1) Cluster-scoped resources (CRDs, ClusterRoles)
+#   2) Namespace-scoped resources (Deployments, Services, etc.) in 'kubeflow' namespace
+#
+# Components installed (~10 pods, ~2 GB RAM):
+#   - ml-pipeline           (KFP API server)
+#   - ml-pipeline-ui        (Dashboard)
+#   - ml-pipeline-persistenceagent
+#   - ml-pipeline-scheduledworkflow
+#   - ml-pipeline-viewer-crd
+#   - ml-pipeline-visualizationserver
+#   - workflow-controller   (Argo workflow engine)
+#   - metadata-grpc-deployment + metadata-envoy + metadata-writer
+#   - mysql                 (KFP internal metadata DB — separate from our PostgreSQL)
+#   - minio                 (KFP internal artifact cache — separate from our MinIO)
+#   - cache-server, cache-deployer-deployment
+#
+# NOTE: KFP brings its own bundled MySQL and MinIO. Our PostgreSQL (mlops ns)
+# and MinIO (minio ns) are used by MLflow and DVC, not by KFP itself.
+# This is the thesis-design choice for component isolation.
+
+- name: Install Kubeflow Pipelines Standalone
+  hosts: localhost
+  connection: local
+  become: true
+  vars_files:
+    - ../inventory/group_vars/all.yml
+
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+    PATH: "/usr/local/bin:/usr/bin:/bin"
+
+  vars:
+    kfp_manifests_url: "github.com/kubeflow/pipelines/manifests/kustomize"
+
+  tasks:
+    # --- 0. Sanity check: kustomize must be available ---
+    - name: Verify kustomize is installed
+      command: /usr/local/bin/kustomize version
+      changed_when: false
+
+    # --- 1. Apply cluster-scoped resources (CRDs, ClusterRoles) ---
+    - name: Build and apply KFP cluster-scoped resources
+      shell: |
+        /usr/local/bin/kustomize build \
+          "{{ kfp_manifests_url }}/cluster-scoped-resources?ref={{ kfp_version }}" \
+          | kubectl apply -f -
+      register: kfp_cluster_apply
+      changed_when: "'created' in kfp_cluster_apply.stdout or 'configured' in kfp_cluster_apply.stdout"
+
+    - name: Wait for Application CRD to be established
+      shell: kubectl wait crd/applications.app.k8s.io --for condition=established --timeout=120s
+      changed_when: false
+
+    # --- 2. Apply namespace-scoped resources (platform-agnostic env) ---
+    - name: Build and apply KFP platform-agnostic env
+      shell: |
+        /usr/local/bin/kustomize build \
+          "{{ kfp_manifests_url }}/env/platform-agnostic?ref={{ kfp_version }}" \
+          | kubectl apply -f -
+      register: kfp_env_apply
+      changed_when: "'created' in kfp_env_apply.stdout or 'configured' in kfp_env_apply.stdout"
+
+    # --- 3. Wait for KFP pods to become Ready (this is the slow step) ---
+    - name: Wait for KFP pods to be Ready (up to 20 min for image pulls)
+      shell: |
+        kubectl wait pods -l application-crd-id=kubeflow-pipelines \
+          -n {{ kfp_namespace }} \
+          --for condition=Ready \
+          --timeout=1200s
+      register: kfp_wait
+      changed_when: false
+      # If the wait fails, we still want to display debug info, not abort entirely
+      ignore_errors: true
+
+    # --- 4. Diagnostics on failure ---
+    - name: Show pod status if wait failed
+      shell: kubectl get pods -n {{ kfp_namespace }} -o wide
+      register: kfp_pods_status
+      changed_when: false
+      when: kfp_wait is failed
+
+    - name: Display pod status (for debugging)
+      debug:
+        var: kfp_pods_status.stdout_lines
+      when: kfp_wait is failed
+
+    - name: Fail if pods are not Ready
+      fail:
+        msg: |
+          KFP pods did not become Ready within 20 min. Check:
+            kubectl get pods -n {{ kfp_namespace }}
+            kubectl describe pod <not-ready-pod> -n {{ kfp_namespace }}
+            kubectl logs <pod> -n {{ kfp_namespace }}
+          Common causes: image pull throttling, OOM (try freeing RAM).
+          Re-run the playbook: ansible-playbook playbooks/06-kfp-standalone.yml
+      when: kfp_wait is failed
+
+    # --- 5. Final summary ---
+    - name: Count KFP pods
+      shell: kubectl get pods -n {{ kfp_namespace }} --no-headers | wc -l
+      register: kfp_pod_count
+      changed_when: false
+
+    - name: Display verification info
+      debug:
+        msg: |
+          KFP Standalone {{ kfp_version }} installed in namespace '{{ kfp_namespace }}'.
+          Pod count: {{ kfp_pod_count.stdout }} (expect ~10)
+          UI service: ml-pipeline-ui.{{ kfp_namespace }}.svc.cluster.local:80
+          API service: ml-pipeline.{{ kfp_namespace }}.svc.cluster.local:8888
+
+          To access the UI from your laptop:
+            kubectl port-forward -n {{ kfp_namespace }} svc/ml-pipeline-ui 8080:80
+          Then open http://localhost:8080 in a browser. (No login — port-forward only.)
