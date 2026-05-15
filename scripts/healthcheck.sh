@@ -1,14 +1,13 @@
 #!/bin/bash
 # scripts/healthcheck.sh
 # Quick health check for the thesis-infra MLOps stack.
-# Run anytime to see what's working and what's broken.
 
-set +e  # don't exit on first error, we want to see all results
+set +e
 
 GREEN='\033[0;32m'
 RED='\033[0;31m'
 YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
 pass() { echo -e "  ${GREEN}OK${NC}    $1"; }
 fail() { echo -e "  ${RED}FAIL${NC}  $1"; }
@@ -106,13 +105,29 @@ echo ""
 
 # --- Resource usage ---
 echo "[6] Resource usage"
-NODE_MEM=$(kubectl top nodes --no-headers 2>/dev/null | awk '{print $4}' | tr -d '%')
-NODE_CPU=$(kubectl top nodes --no-headers 2>/dev/null | awk '{print $3}' | tr -d '%')
-if [ -n "$NODE_MEM" ]; then
-  if [ "$NODE_MEM" -gt 85 ]; then
-    fail "RAM usage HIGH: ${NODE_MEM}% (CPU: ${NODE_CPU}%)"
+# kubectl top nodes output varies: with/without VOLUMEATTRIBUTESCLASS column.
+# We auto-detect the percentage columns by parsing header.
+TOP_OUTPUT=$(kubectl top nodes 2>/dev/null)
+if [ -n "$TOP_OUTPUT" ]; then
+  HEADER=$(echo "$TOP_OUTPUT" | head -1)
+  DATA=$(echo "$TOP_OUTPUT" | tail -1)
+  # Find column positions
+  CPU_PCT_COL=$(echo "$HEADER" | awk '{for(i=1;i<=NF;i++) if($i=="CPU%") print i}')
+  MEM_PCT_COL=$(echo "$HEADER" | awk '{for(i=1;i<=NF;i++) if($i=="MEMORY%") print i}')
+  if [ -n "$CPU_PCT_COL" ] && [ -n "$MEM_PCT_COL" ]; then
+    NODE_CPU=$(echo "$DATA" | awk -v c="$CPU_PCT_COL" '{print $c}' | tr -d '%')
+    NODE_MEM=$(echo "$DATA" | awk -v c="$MEM_PCT_COL" '{print $c}' | tr -d '%')
+    if [ -n "$NODE_MEM" ] && [ "$NODE_MEM" -eq "$NODE_MEM" ] 2>/dev/null; then
+      if [ "$NODE_MEM" -gt 85 ]; then
+        fail "RAM usage HIGH: ${NODE_MEM}% (CPU: ${NODE_CPU}%)"
+      else
+        pass "RAM usage OK: ${NODE_MEM}% (CPU: ${NODE_CPU}%)"
+      fi
+    else
+      warn "Could not parse memory percentage (got: '$NODE_MEM')"
+    fi
   else
-    pass "RAM usage OK: ${NODE_MEM}% (CPU: ${NODE_CPU}%)"
+    warn "Could not find CPU%/MEMORY% columns in 'kubectl top nodes' output"
   fi
 else
   warn "metrics-server not ready yet"
