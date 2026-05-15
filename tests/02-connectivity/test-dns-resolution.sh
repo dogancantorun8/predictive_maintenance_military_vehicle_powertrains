@@ -4,12 +4,14 @@ source "$(dirname "$0")/../_lib.sh"
 
 test_header "Cluster DNS resolution"
 
-# Try common service DNS names; SKIP gracefully if service not yet deployed
 for svc_fqdn in \
   "minio.minio.svc.cluster.local" \
   "postgres.mlops.svc.cluster.local" \
   "mlflow.mlops.svc.cluster.local" \
-  "ml-pipeline.kubeflow.svc.cluster.local"
+  "ml-pipeline.kubeflow.svc.cluster.local" \
+  "prometheus-grafana.monitoring.svc.cluster.local" \
+  "prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local" \
+  "prometheus-kube-prometheus-alertmanager.monitoring.svc.cluster.local"
 do
   ns=$(echo "$svc_fqdn" | cut -d. -f2)
   svc=$(echo "$svc_fqdn" | cut -d. -f1)
