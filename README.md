@@ -151,7 +151,7 @@ thesis-infra/
 │   ├── 03-helm-tools.yml       # Helm, kustomize, krew            [done]
 │   ├── 04-minio.yml            # S3-compatible object storage     [done]
 │   ├── 05-postgres.yml         # MLflow / KFP metadata DB         [pending]
-│   ├── 06-kfp-standalone.yml   # Kubeflow Pipelines               [pending]
+│   ├── 06-kfp-standalone.yml   # Kubeflow Pipelines               [done]
 │   ├── 07-mlflow.yml           # Experiment tracking + Registry   [pending]
 │   ├── 08-monitoring.yml       # Prometheus + Grafana + Evidently [pending]
 │   └── 09-fastapi.yml          # Inference REST endpoint          [pending]
