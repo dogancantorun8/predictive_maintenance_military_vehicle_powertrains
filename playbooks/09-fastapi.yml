@@ -1,0 +1,302 @@
+---
+# playbooks/09-fastapi.yml
+# Builds the FastAPI inference image with nerdctl + buildkit and deploys
+# it to the mlops namespace.
+#
+# Why nerdctl + buildkit (and not Docker)?
+#   - k3s already runs containerd; building directly into its k8s.io namespace
+#     avoids a parallel Docker daemon (~150 MB RAM saved)
+#   - nerdctl is the containerd-native CLI with Docker-compatible syntax
+#   - buildkit is the image-building engine (separate from the runtime).
+#     Ubuntu 22.04's apt does not provide it, so we install the prebuilt
+#     binary from the upstream GitHub release.
+
+- name: Build and deploy FastAPI inference service (nerdctl + buildkit)
+  hosts: localhost
+  connection: local
+  become: true
+  vars_files:
+    - ../inventory/group_vars/all.yml
+    - ../inventory/group_vars/vault.yml
+
+  vars:
+    thesis_repo: "/root/thesis-infra"
+    fastapi_image: "{{ fastapi_image_name }}:{{ fastapi_image_tag }}"
+    nerdctl_binary: "/usr/local/bin/nerdctl"
+    nerdctl_url: "https://github.com/containerd/nerdctl/releases/download/v{{ nerdctl_version }}/nerdctl-{{ nerdctl_version }}-linux-{{ nerdctl_arch }}.tar.gz"
+    nerdctl_tarball: "/tmp/nerdctl.tar.gz"
+    buildkit_url: "https://github.com/moby/buildkit/releases/download/v{{ buildkit_version }}/buildkit-v{{ buildkit_version }}.linux-{{ buildkit_arch }}.tar.gz"
+    buildkit_tarball: "/tmp/buildkit.tar.gz"
+
+  tasks:
+    # ===========================================================
+    # PART 1A: Install nerdctl
+    # ===========================================================
+    - name: Check if nerdctl is already installed
+      stat:
+        path: "{{ nerdctl_binary }}"
+      register: nerdctl_check
+
+    - name: Download nerdctl tarball
+      get_url:
+        url: "{{ nerdctl_url }}"
+        dest: "{{ nerdctl_tarball }}"
+        mode: '0644'
+        timeout: 60
+      when: not nerdctl_check.stat.exists
+
+    - name: Extract nerdctl binary to /usr/local/bin
+      unarchive:
+        src: "{{ nerdctl_tarball }}"
+        dest: /usr/local/bin
+        remote_src: yes
+        include:
+          - nerdctl
+        mode: '0755'
+      when: not nerdctl_check.stat.exists
+
+    - name: Clean up nerdctl tarball
+      file:
+        path: "{{ nerdctl_tarball }}"
+        state: absent
+
+    - name: Verify nerdctl
+      command: "{{ nerdctl_binary }} --version"
+      register: nerdctl_version_check
+      changed_when: false
+
+    - name: Display nerdctl version
+      debug:
+        msg: "nerdctl installed: {{ nerdctl_version_check.stdout }}"
+
+    # ===========================================================
+    # PART 1B: Install buildkit (binary release — apt does not have it on Ubuntu 22.04)
+    # ===========================================================
+    - name: Check if buildkitd is already installed
+      stat:
+        path: /usr/local/bin/buildkitd
+      register: buildkit_check
+
+    - name: Download buildkit tarball
+      get_url:
+        url: "{{ buildkit_url }}"
+        dest: "{{ buildkit_tarball }}"
+        mode: '0644'
+        timeout: 120
+      when: not buildkit_check.stat.exists
+
+    - name: Extract buildkit binaries to /usr/local
+      unarchive:
+        src: "{{ buildkit_tarball }}"
+        dest: /usr/local
+        remote_src: yes
+        mode: '0755'
+      when: not buildkit_check.stat.exists
+
+    - name: Clean up buildkit tarball
+      file:
+        path: "{{ buildkit_tarball }}"
+        state: absent
+
+    - name: Verify buildkitd binary
+      command: /usr/local/bin/buildkitd --version
+      register: buildkit_version_check
+      changed_when: false
+
+    - name: Display buildkit version
+      debug:
+        msg: "buildkit installed: {{ buildkit_version_check.stdout }}"
+
+    # ===========================================================
+    # PART 1C: Configure buildkitd as a systemd service
+    # ===========================================================
+    - name: Create buildkit systemd service file
+      copy:
+        dest: /etc/systemd/system/buildkitd.service
+        mode: '0644'
+        content: |
+          [Unit]
+          Description=BuildKit daemon
+          Documentation=https://github.com/moby/buildkit
+          After=network.target containerd.service
+
+          [Service]
+          Type=notify
+          ExecStart=/usr/local/bin/buildkitd
+          Restart=always
+          RestartSec=2
+          KillMode=mixed
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Enable and start buildkitd service
+      systemd:
+        name: buildkitd
+        daemon_reload: yes
+        enabled: yes
+        state: started
+
+    - name: Wait for buildkit socket to appear
+      wait_for:
+        path: /run/buildkit/buildkitd.sock
+        timeout: 30
+
+    # ===========================================================
+    # PART 2: Build FastAPI image with nerdctl into k3s containerd
+    # ===========================================================
+    - name: Build FastAPI image with nerdctl (into k3s containerd k8s.io namespace)
+      shell: |
+        {{ nerdctl_binary }} \
+          --address /run/k3s/containerd/containerd.sock \
+          -n k8s.io \
+          build \
+            --buildkit-host unix:///run/buildkit/buildkitd.sock \
+            -t {{ fastapi_image }} \
+            {{ thesis_repo }}/files/fastapi/
+      register: nerdctl_build
+      changed_when: "'writing image' in nerdctl_build.stderr or 'naming to' in nerdctl_build.stderr or 'exporting layers' in nerdctl_build.stderr"
+
+    - name: Verify image is in k3s containerd k8s.io namespace
+      shell: |
+        {{ nerdctl_binary }} \
+          --address /run/k3s/containerd/containerd.sock \
+          -n k8s.io \
+          images {{ fastapi_image }}
+      register: image_check
+      changed_when: false
+
+    - name: Display built image info
+      debug:
+        var: image_check.stdout_lines
+
+    # ===========================================================
+    # PART 3: Kubernetes Secret for MinIO credentials
+    # ===========================================================
+    - name: Ensure mlops namespace exists
+      kubernetes.core.k8s:
+        api_version: v1
+        kind: Namespace
+        name: "{{ fastapi_namespace }}"
+        state: present
+
+    - name: Create MinIO credentials Secret
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: minio-credentials
+            namespace: "{{ fastapi_namespace }}"
+          type: Opaque
+          stringData:
+            access_key: "{{ vault_minio_user }}"
+            secret_key: "{{ vault_minio_password }}"
+
+    # ===========================================================
+    # PART 4: Apply FastAPI Kubernetes manifests
+    # ===========================================================
+    - name: Apply FastAPI Deployment
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ thesis_repo }}/files/fastapi/k8s/deployment.yaml"
+
+    - name: Apply FastAPI Service
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ thesis_repo }}/files/fastapi/k8s/service.yaml"
+
+    - name: Apply FastAPI ServiceMonitor
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ thesis_repo }}/files/fastapi/k8s/servicemonitor.yaml"
+
+    - name: Force rollout to pick up freshly built image
+      command: kubectl rollout restart deployment/fastapi -n {{ fastapi_namespace }}
+      changed_when: true
+
+    # ===========================================================
+    # PART 5: Wait for pod Ready
+    # ===========================================================
+    - name: Wait for FastAPI pod to be Ready
+      shell: |
+        kubectl get pods -n {{ fastapi_namespace }} -l app=fastapi \
+          -o jsonpath='{.items[0].status.conditions[?(@.type=="Ready")].status}' 2>/dev/null
+      register: fastapi_ready
+      until: fastapi_ready.stdout == "True"
+      retries: 36
+      delay: 5
+      changed_when: false
+
+    - name: Show FastAPI pod status
+      shell: kubectl get pods -n {{ fastapi_namespace }} -l app=fastapi
+      register: fastapi_pod_status
+      changed_when: false
+
+    - name: Display pod status
+      debug:
+        var: fastapi_pod_status.stdout_lines
+
+    # ===========================================================
+    # PART 6: Smoke tests
+    # ===========================================================
+    - name: Smoke test — /healthz endpoint
+      shell: |
+        kubectl run fastapi-h-{{ ansible_date_time.epoch }} --rm -i --restart=Never \
+          --image=busybox:1.36 --quiet -- \
+          wget -qO- http://fastapi.{{ fastapi_namespace }}.svc.cluster.local:8000/healthz
+      register: healthz_test
+      changed_when: false
+
+    - name: Verify /healthz returns 'ok'
+      assert:
+        that:
+          - "'ok' in healthz_test.stdout"
+        success_msg: "/healthz responded: {{ healthz_test.stdout }}"
+        fail_msg: "/healthz unexpected response: {{ healthz_test.stdout }}"
+
+    - name: Smoke test — /predict endpoint
+      shell: |
+        kubectl run fastapi-p-{{ ansible_date_time.epoch }} --rm -i --restart=Never \
+          --image=curlimages/curl:8.10.1 --quiet -- \
+          curl -sf -X POST http://fastapi.{{ fastapi_namespace }}.svc.cluster.local:8000/predict \
+            -H 'Content-Type: application/json' \
+            -d '{"features":[0.0023,-0.0003,100.0,518.67,641.82,1589.7,1400.6,14.62,21.61,554.36,2388.06,9046.19,1.3,47.47,521.66,2388.02,8138.62,8.4195,0.03,392,2388]}'
+      register: predict_test
+      changed_when: false
+
+    - name: Verify /predict returns a RUL value
+      assert:
+        that:
+          - "'rul' in predict_test.stdout"
+        success_msg: "/predict responded: {{ predict_test.stdout }}"
+        fail_msg: "/predict unexpected response: {{ predict_test.stdout }}"
+
+    # ===========================================================
+    # PART 7: Summary
+    # ===========================================================
+    - name: Display final summary
+      debug:
+        msg: |
+          Playbook 09 complete.
+
+          Build tool:   nerdctl {{ nerdctl_version }} + buildkit {{ buildkit_version }}
+                        (containerd-native, no Docker daemon)
+          Image:        {{ fastapi_image }}
+          Namespace:    {{ fastapi_namespace }}
+          Service:      fastapi.{{ fastapi_namespace }}.svc.cluster.local:8000
+
+          /healthz:     {{ healthz_test.stdout }}
+          /predict:     {{ predict_test.stdout }}
+
+          Browser access (after port-forward):
+            ./scripts/port-forward-all.sh restart
+            http://localhost:8000          (root info)
+            http://localhost:8000/docs     (interactive Swagger UI)
+            http://localhost:8000/metrics  (Prometheus metrics)
+
+          The service is running with a STUB model (returns RUL=125.0).
+          Once you train a model and register it in MLflow under name
+          'cmapss-rul' with stage 'Production', restart the deployment:
+            kubectl rollout restart deployment/fastapi -n {{ fastapi_namespace }}

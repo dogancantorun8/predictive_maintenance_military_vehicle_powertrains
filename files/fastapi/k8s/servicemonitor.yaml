@@ -1,0 +1,23 @@
+# files/fastapi/k8s/servicemonitor.yaml
+# Tells Prometheus to scrape FastAPI /metrics endpoint.
+# Requires kube-prometheus-stack (Playbook 08) — provides this CRD.
+
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: fastapi
+  namespace: mlops
+  labels:
+    app: fastapi
+    release: prometheus              # Match the Helm release label so kube-prometheus-stack picks it up
+spec:
+  selector:
+    matchLabels:
+      app: fastapi
+  namespaceSelector:
+    matchNames:
+      - mlops
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 30s

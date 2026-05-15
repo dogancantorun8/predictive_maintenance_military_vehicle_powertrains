@@ -1,0 +1,75 @@
+# files/fastapi/k8s/deployment.yaml
+# FastAPI inference deployment in the mlops namespace.
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fastapi
+  namespace: mlops
+  labels:
+    app: fastapi
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fastapi
+  template:
+    metadata:
+      labels:
+        app: fastapi
+      annotations:
+        # Tell Prometheus to scrape /metrics
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: "/metrics"
+    spec:
+      containers:
+        - name: fastapi
+          image: thesis/fastapi:0.1.0
+          imagePullPolicy: Never           # Image is locally loaded into k3s
+          ports:
+            - containerPort: 8000
+              name: http
+          env:
+            - name: MLFLOW_TRACKING_URI
+              value: "http://mlflow.mlops.svc.cluster.local:5000"
+            - name: MLFLOW_S3_ENDPOINT_URL
+              value: "http://minio.minio.svc.cluster.local:9000"
+            - name: MODEL_NAME
+              value: "cmapss-rul"
+            - name: MODEL_STAGE
+              value: "Production"
+            - name: STUB_RUL
+              value: "125.0"
+            # MLflow needs AWS-style env vars to talk to MinIO
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: minio-credentials
+                  key: access_key
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: minio-credentials
+                  key: secret_key
+            - name: AWS_DEFAULT_REGION
+              value: "us-east-1"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 30

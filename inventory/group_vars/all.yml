@@ -47,3 +47,20 @@ cmapss_zip_sha256: ""                    # Hash check — will fill in after fir
 # === DVC ===
 dvc_remote_name: "minio-remote"
 dvc_remote_url: "s3://thesis-data/dvc"   # Subpath inside thesis-data bucket
+
+# === FastAPI inference service ===
+fastapi_image_name: "thesis/fastapi"
+fastapi_image_tag: "0.1.0"
+fastapi_namespace: "{{ mlops_namespace }}"
+
+# === nerdctl (containerd-native CLI for image build) ===
+# Used to build FastAPI image directly against k3s's embedded containerd,
+# avoiding a separate Docker daemon. Drop-in replacement for `docker build`.
+nerdctl_version: "1.7.7"
+nerdctl_arch: "amd64"
+
+# === buildkit (image builder, used by nerdctl) ===
+# Ubuntu 22.04 apt does not ship buildkit; we install the prebuilt binary
+# from the upstream GitHub release.
+buildkit_version: "0.15.2"
+buildkit_arch: "amd64"
