@@ -79,7 +79,7 @@ These are the addresses your applications use, **not your browser**.
 ./tests/run-all.sh                  # all 4 tiers (~2 min)
 ./tests/run-all.sh 01-infra         # only infrastructure tier
 ./tests/run-all.sh 02-connectivity  # only network/DNS tier
-./tests/run-all.sh 03-functional    # only functional tier (MinIO/PG/MLflow/KFP/Prom/Grafana/AM)
+./tests/run-all.sh 03-functional    # only functional tier
 ```
 
 ### Single test
@@ -90,6 +90,7 @@ These are the addresses your applications use, **not your browser**.
 ./tests/03-functional/test-prometheus-api.sh
 ./tests/03-functional/test-grafana-api.sh
 ./tests/03-functional/test-alertmanager-api.sh
+./tests/03-functional/test-dvc-data.sh
 ./tests/01-infra/test-namespaces.sh
 ```
 
@@ -151,6 +152,7 @@ ansible-playbook playbooks/04-minio.yml --ask-vault-pass
 ansible-playbook playbooks/05-postgres.yml --ask-vault-pass
 ansible-playbook playbooks/07-mlflow.yml --ask-vault-pass
 ansible-playbook playbooks/08-monitoring.yml --ask-vault-pass
+ansible-playbook playbooks/10-data-and-dev-env.yml --ask-vault-pass
 
 # Vault file management
 ansible-vault view inventory/group_vars/vault.yml      # read decrypted
@@ -162,7 +164,7 @@ ansible-vault encrypt inventory/group_vars/vault.yml   # encrypt plain text
 
 ## 6. Deployment Status
 
-| #  | Playbook              | Status   | Pods deployed                                      |
+| #  | Playbook              | Status   | Pods / Artifacts                                   |
 |----|-----------------------|----------|----------------------------------------------------|
 | 01 | system-prep           | done     | n/a (host-level config)                            |
 | 02 | k3s                   | done     | 3 in kube-system (coredns, local-path, metrics)    |
@@ -173,10 +175,54 @@ ansible-vault encrypt inventory/group_vars/vault.yml   # encrypt plain text
 | 07 | mlflow                | done     | 1 in mlops (mlflow-...)                            |
 | 08 | monitoring            | done     | 6 in monitoring (Prom + Grafana + AM + exporters)  |
 | 09 | fastapi               | pending  | 1 in mlops (planned)                               |
+| 10 | data-and-dev-env      | done     | .venv + 13 C-MAPSS files (DVC, MinIO sync)         |
 
 ---
 
-## 7. Git Workflow
+## 7. DVC Operations (data versioning)
+
+### Activate the Python venv first
+
+```bash
+source /root/thesis-infra/.venv/bin/activate
+```
+
+### Common DVC commands
+
+```bash
+# Check current data state vs. tracked state
+dvc status
+
+# Show configured remotes
+dvc remote list
+
+# Pull tracked data from MinIO (e.g. on a fresh VM)
+dvc pull
+
+# Push local changes to MinIO (after modifying data)
+dvc add data/raw/cmapss        # re-hash and update metadata
+dvc push                       # upload changed files to MinIO
+
+# Inspect what's in MinIO under DVC's namespace
+kubectl exec -n minio deploy/minio -- mc ls --recursive local/thesis-data/dvc/
+```
+
+### Restoring data on a fresh VM (full reproducibility)
+
+```bash
+git clone <thesis-infra-repo>
+cd thesis-infra
+ansible-playbook playbooks/10-data-and-dev-env.yml --ask-vault-pass
+# This recreates venv AND restores the C-MAPSS data from MinIO.
+
+# OR (if venv + DVC already exist on the VM):
+source .venv/bin/activate
+dvc pull
+```
+
+---
+
+## 8. Git Workflow
 
 ```bash
 git status                                     # what changed?
@@ -186,11 +232,18 @@ git push origin main
 
 # Check the vault is encrypted before committing:
 head -1 inventory/group_vars/vault.yml         # must start with $ANSIBLE_VAULT
+
+# After modifying data:
+dvc add data/raw/cmapss
+git add data/raw/cmapss.dvc .gitignore
+git commit -m "data: update C-MAPSS subset"
+dvc push                                       # don't forget to push data!
+git push origin main
 ```
 
 ---
 
-## 8. Typical First-Look Sequence (5 minutes)
+## 9. Typical First-Look Sequence (5 minutes)
 
 After SSHing into the VM, do this to "get oriented":
 
@@ -205,9 +258,13 @@ cd /root/thesis-infra
 
 # 3. Quick deep-check
 ./tests/run-all.sh 01-infra
+
+# 4. Activate venv if you'll work with Python/DVC
+source .venv/bin/activate
+dvc status
 ```
 
-If all three are green, the platform is ready to use. Open in browser:
+If all checks are green, the platform is ready. Open in browser:
 - http://localhost:9001 (MinIO Console — see the 3 buckets)
 - http://localhost:5000 (MLflow — see experiments)
 - http://localhost:8080 (Kubeflow Pipelines)
@@ -216,32 +273,38 @@ If all three are green, the platform is ready to use. Open in browser:
 
 ---
 
-## 9. Troubleshooting
+## 10. Troubleshooting
 
 | Symptom                                     | Likely Fix                                    |
 |---------------------------------------------|-----------------------------------------------|
 | Browser shows nothing on http://localhost:X | port-forward not running — `./scripts/port-forward-all.sh` |
 | "port X already in use"                     | `./scripts/port-forward-all.sh stop` then start again |
-| `./scripts/port-forward-all.sh status` shows `(none)` but ports are listening | Old kubectl process held the port — `pkill -9 -f "kubectl port-forward"` then restart |
+| `port-forward-all.sh status` shows `(none)` but ports listening | Old kubectl process holds port — `pkill -9 -f "kubectl port-forward"` then restart |
 | `kubectl` shows pods Pending                | RAM/CPU pressure — `kubectl top nodes` to check |
 | Pod `CrashLoopBackOff`                      | `kubectl logs <pod> -n <ns> --tail=50`        |
 | `ansible-vault` says "no vault secrets"     | Add `--ask-vault-pass` to the playbook command |
 | VSCode tunnel broken                        | Reload window: `Ctrl+Shift+P` → "Reload Window" |
 | Grafana login fails                         | Get password: `ansible-vault view inventory/group_vars/vault.yml \| grep grafana` |
+| `dvc push` fails with auth error            | Make sure port-forward 9000 is up: `./scripts/port-forward-all.sh status \| grep 9000` |
+| `dvc init` fails with `_DIR_MARK` import    | DVC < 3.59 has a pathspec bug — upgrade via Playbook 10 |
+| C-MAPSS download error in Playbook 10       | NASA wraps files in a doubly-nested zip; Playbook 10 handles both layers |
 
 ---
 
-## 10. Useful Files
+## 11. Useful Files
 
-| Path                                      | What it is                              |
-|-------------------------------------------|-----------------------------------------|
-| `README.md`                               | Project goal + architecture diagram     |
-| `inventory/group_vars/all.yml`            | All Ansible variables (versions, names) |
-| `inventory/group_vars/vault.yml`          | Encrypted secrets                       |
-| `playbooks/0X-*.yml`                      | The 9 Ansible playbooks                 |
-| `files/monitoring/kube-prometheus-stack-values.yaml` | Helm values for Playbook 08    |
-| `scripts/healthcheck.sh`                  | Fast health snapshot                    |
-| `scripts/port-forward-all.sh`             | Open all UIs to laptop                  |
-| `tests/run-all.sh`                        | Full test suite orchestrator            |
-| `tests/README.md`                         | Testing strategy + design principles    |
-| `docs/FIRST_LOOK.md`                      | This file                               |
+| Path                                              | What it is                              |
+|---------------------------------------------------|-----------------------------------------|
+| `README.md`                                       | Project goal + architecture diagram     |
+| `inventory/group_vars/all.yml`                    | All Ansible variables (versions, names) |
+| `inventory/group_vars/vault.yml`                  | Encrypted secrets                       |
+| `playbooks/0X-*.yml`                              | The 9+1 Ansible playbooks               |
+| `files/monitoring/kube-prometheus-stack-values.yaml` | Helm values for Playbook 08          |
+| `files/data/requirements.txt`                     | Python deps for Playbook 10             |
+| `.dvc/config`                                     | DVC remote (MinIO) configuration        |
+| `data/raw/cmapss.dvc`                             | DVC metadata pointer (data is in MinIO) |
+| `scripts/healthcheck.sh`                          | Fast health snapshot                    |
+| `scripts/port-forward-all.sh`                     | Open all UIs to laptop                  |
+| `tests/run-all.sh`                                | Full test suite orchestrator            |
+| `tests/README.md`                                 | Testing strategy + design principles    |
+| `docs/FIRST_LOOK.md`                              | This file                               |

@@ -16,11 +16,11 @@ The thesis differentiates itself from the typical "train an LSTM on C-MAPSS, rep
 
 All components are 100% open source and run on a single Hetzner VM, making the stack reproducible inside any on-prem or air-gapped data center — relevant for defense-sector deployments where cloud is not an option.
 
-**Dataset:** NASA C-MAPSS turbofan degradation dataset (open-access proxy for classified military engine telemetry).
+**Dataset:** NASA C-MAPSS turbofan degradation dataset (open-access proxy for classified military engine telemetry). Data is versioned via DVC and stored in MinIO; the GitHub repository contains only the metadata pointer (`*.dvc` file).
 
 **Deployment target:** Hetzner Cloud CCX23 (4 dedicated vCPU · 16 GB RAM · 160 GB NVMe SSD · Ubuntu 22.04 LTS · Falkenstein, Germany).
 
-**Provisioning time:** ~50 minutes from a blank VM to a fully running MLOps stack via `ansible-playbook site.yml`.
+**Provisioning time:** A blank VM reaches a fully running MLOps stack via `ansible-playbook site.yml` in approximately 50 minutes, plus a `dvc pull` to restore the dataset from MinIO.
 
 ---
 
@@ -46,7 +46,7 @@ flowchart TB
 
             subgraph MINIO["minio namespace (Playbook 04) — DEPLOYED"]
                 MIO["Deployment: minio (Helm chart minio-5.4.0)<br/>PVC: 50 Gi · local-path"]
-                B1["thesis-data<br/>(DVC remote)"]
+                B1["thesis-data<br/>(DVC remote — C-MAPSS)"]
                 B2["thesis-mlflow<br/>(artifacts)"]
                 B3["thesis-models<br/>(model cache)"]
                 SVC1["svc/minio :9000 (S3 API)<br/>svc/minio-console :9001 (Web UI)"]
@@ -61,15 +61,20 @@ flowchart TB
             end
 
             subgraph KF["kubeflow namespace (Playbook 06) — DEPLOYED"]
-                KFP["Kubeflow Pipelines Standalone (14 pods)<br/>KFP API · UI · ml-metadata · Argo<br/>workflow-controller · persistence-agent<br/>bundled MySQL + MinIO (internal cache)<br/>NOT installed: Istio, Dex, KServe, Katib, Notebooks"]
+                KFP["Kubeflow Pipelines Standalone (14 pods)<br/>KFP API · UI · ml-metadata · Argo<br/>workflow-controller · persistence-agent<br/>bundled MySQL + seaweedfs (internal cache)<br/>NOT installed: Istio, Dex, KServe, Katib, Notebooks"]
             end
 
             subgraph MON["monitoring namespace (Playbook 08) — DEPLOYED"]
-                PROM["Prometheus (kube-prometheus-stack 85.0.3)<br/>10 Gi PVC · 5d retention<br/>scrapes all namespaces"]
+                PROM["Prometheus (kube-prometheus-stack 85.0.3)<br/>10 Gi PVC · 5d retention · 13 UP targets<br/>scrapes all namespaces"]
                 GRAF["Grafana<br/>5 Gi PVC · 25+ pre-built dashboards<br/>admin password from vault"]
                 AM["Alertmanager<br/>2 Gi PVC · webhook receiver<br/>(will trigger KFP retraining on drift)"]
                 EVI["Evidently CronJob — PENDING<br/>(hourly drift score: PSI + KS)"]
             end
+        end
+
+        subgraph DEV["Dev environment (Playbook 10) — DEPLOYED"]
+            VENV["Python 3.12 venv at /root/thesis-infra/.venv<br/>DVC 3.67 · MLflow 2.18 · PyTorch CPU · Evidently · Optuna"]
+            DVC["DVC tracking<br/>data/raw/cmapss/ → 13 .txt files (gitignored)<br/>data/raw/cmapss.dvc → 300-byte metadata (in Git)<br/>Remote: s3://thesis-data/dvc/ (MinIO)<br/>15 objects pushed"]
         end
 
         subgraph TOOLS["Tooling (Playbook 03) — DEPLOYED"]
@@ -91,7 +96,7 @@ flowchart TB
     classDef partial fill:#fff3cd,stroke:#ffc107,color:#856404
     classDef external fill:#cce5ff,stroke:#0066cc,color:#004085
 
-    class SYS,MINIO,KF,MON,TOOLS,IAC done
+    class SYS,MINIO,KF,MON,TOOLS,IAC,DEV done
     class MLOPS partial
     class LAPTOP,GH external
 ```
@@ -108,13 +113,15 @@ flowchart TB
 
 5. **kubeflow namespace**: Kubeflow Pipelines Standalone — pipeline orchestration only. Notebooks, Katib, KServe, Dex, Istio are deliberately omitted; they would consume ~4 GB extra RAM and add no thesis value. Replaced by VSCode Remote-SSH (notebooks), Optuna (HP search), and FastAPI (serving).
 
-6. **monitoring namespace**: Prometheus scrapes pod metrics across all namespaces; Grafana visualizes them through 25+ pre-built Kubernetes dashboards. Alertmanager fires webhooks on threshold breach — once the Evidently CronJob is added, this becomes the trigger for the closed-loop retraining cycle.
+6. **monitoring namespace**: Prometheus scrapes pod metrics across all namespaces (currently 13 UP scrape targets); Grafana visualizes them through 25+ pre-built Kubernetes dashboards. Alertmanager fires webhooks on threshold breach — once the Evidently CronJob is added, this becomes the trigger for the closed-loop retraining cycle.
 
-7. **Ansible**: Provisioning runs on the VM itself (`connection: local`). No tooling on the laptop. Each playbook is idempotent and component-scoped, so a failure can be debugged in isolation. Secrets are stored encrypted via `ansible-vault`.
+7. **Dev environment & DVC**: A Python 3.12 virtual environment with DVC, MLflow, PyTorch (CPU), Evidently, and Optuna. The C-MAPSS dataset is versioned by DVC — the 13 `.txt` files (~17 MB) live in MinIO bucket `thesis-data/dvc/`, while only a 300-byte metadata pointer (`cmapss.dvc`) is committed to Git. Reproducing the exact dataset used by any commit is a two-step recipe: `git checkout <hash>` then `dvc pull`.
 
-8. **Laptop**: Used only for SSH-based development through VSCode Remote-SSH and for opening port-forwarded UIs in a browser. No Docker, Python, kubectl, or Ansible is installed locally.
+8. **Ansible**: Provisioning runs on the VM itself (`connection: local`). No tooling on the laptop. Each playbook is idempotent and component-scoped, so a failure can be debugged in isolation. Secrets are stored encrypted via `ansible-vault`.
 
-9. **GitHub**: Public source of truth. The encrypted vault file is committed — the AES256 ciphertext is safe to publish; only someone with the vault password can decrypt it.
+9. **Laptop**: Used only for SSH-based development through VSCode Remote-SSH and for opening port-forwarded UIs in a browser. No Docker, Python, kubectl, or Ansible is installed locally.
+
+10. **GitHub**: Public source of truth. The encrypted vault file is committed — the AES256 ciphertext is safe to publish; only someone with the vault password can decrypt it. Raw data is excluded from Git (versioned by DVC instead).
 
 ---
 
@@ -157,6 +164,7 @@ thesis-infra/
 ├── ansible.cfg                 # Ansible global config
 ├── requirements.yml            # Galaxy collections
 ├── README.md                   # This file
+├── LICENSE                     # MIT
 │
 ├── inventory/
 │   ├── localhost.yml           # connection: local
@@ -165,19 +173,32 @@ thesis-infra/
 │       └── vault.yml           # AES256-encrypted secrets
 │
 ├── playbooks/
-│   ├── 01-system-prep.yml      # kernel, swap, sysctl, firewall  [done]
-│   ├── 02-k3s.yml              # Kubernetes                       [done]
-│   ├── 03-helm-tools.yml       # Helm, kustomize, krew            [done]
-│   ├── 04-minio.yml            # S3-compatible object storage     [done]
-│   ├── 05-postgres.yml         # MLflow / KFP metadata DB         [done]
-│   ├── 06-kfp-standalone.yml   # Kubeflow Pipelines               [done]
-│   ├── 07-mlflow.yml           # Experiment tracking + Registry   [done]
+│   ├── 01-system-prep.yml      # kernel, swap, sysctl, firewall    [done]
+│   ├── 02-k3s.yml              # Kubernetes                         [done]
+│   ├── 03-helm-tools.yml       # Helm, kustomize, krew              [done]
+│   ├── 04-minio.yml            # S3-compatible object storage       [done]
+│   ├── 05-postgres.yml         # MLflow / KFP metadata DB           [done]
+│   ├── 06-kfp-standalone.yml   # Kubeflow Pipelines                 [done]
+│   ├── 07-mlflow.yml           # Experiment tracking + Registry     [done]
 │   ├── 08-monitoring.yml       # Prometheus + Grafana + Alertmanager [done]
-│   └── 09-fastapi.yml          # Inference REST endpoint          [pending]
+│   ├── 09-fastapi.yml          # Inference REST endpoint            [pending]
+│   └── 10-data-and-dev-env.yml # Python venv + C-MAPSS + DVC        [done]
 │
-├── files/                      # Static configs (Helm values, manifests)
+├── files/                      # Static configs (Helm values, init SQL, etc.)
 │   ├── postgres/               # PostgreSQL init SQL
-│   └── monitoring/             # kube-prometheus-stack values.yaml
+│   ├── monitoring/             # kube-prometheus-stack values.yaml
+│   └── data/                   # requirements.txt (Python deps)
+│
+├── data/                       # Project data (mostly gitignored)
+│   ├── raw/
+│   │   ├── cmapss/             # 13 C-MAPSS .txt files (gitignored, DVC tracked)
+│   │   └── cmapss.dvc          # DVC metadata pointer (300 bytes, in Git)
+│   └── processed/              # Output of preprocessing (gitignored)
+│
+├── .dvc/                       # DVC configuration
+│   ├── config                  # MinIO remote definition
+│   └── .gitignore              # Cache exclusion (auto-generated)
+├── .dvcignore                  # DVC scan exclusion list
 │
 ├── scripts/                    # Helper bash scripts
 │   ├── healthcheck.sh          # Fast cluster health snapshot
@@ -185,11 +206,13 @@ thesis-infra/
 │
 ├── tests/                      # Hierarchical test suite
 │   ├── README.md               # Testing strategy + design principles
+│   ├── _lib.sh                 # Common helpers (pass/fail/skip + assertions)
 │   ├── run-all.sh              # Orchestrator
 │   ├── 01-infra/               # Pod/PVC/node-level tests
 │   ├── 02-connectivity/        # DNS + cross-pod reachability
-│   ├── 03-functional/          # MinIO/Postgres/MLflow/Prometheus/Grafana
-│   └── 99-integration/         # End-to-end scenarios (future)
+│   ├── 03-functional/          # MinIO/Postgres/MLflow/KFP/Prometheus/
+│   │                           # Grafana/Alertmanager/DVC R/W and API
+│   └── 99-integration/         # End-to-end scenarios (planned)
 │
 └── docs/                       # Operational documentation
     └── FIRST_LOOK.md           # Quick-reference for daily use
