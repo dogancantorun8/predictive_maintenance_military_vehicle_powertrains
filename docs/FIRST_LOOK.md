@@ -1,0 +1,225 @@
+# First Look Guide
+
+Operational quick reference for the thesis-infra MLOps stack.
+**Everything you need to start, verify, and access the platform — in one page.**
+
+---
+
+## 0. Connect to the VM
+
+```bash
+# From your laptop (VSCode Remote-SSH does this for you):
+ssh root@<VM_IP>
+cd /root/thesis-infra
+```
+
+---
+
+## 1. Start Port-Forwards (access from your laptop browser)
+
+```bash
+./scripts/port-forward-all.sh           # start all available services
+./scripts/port-forward-all.sh status    # check what's running
+./scripts/port-forward-all.sh stop      # kill all forwards
+./scripts/port-forward-all.sh restart   # stop + start
+```
+
+---
+
+## 2. Access Endpoints
+
+### Browser URLs (after port-forward is running)
+
+| Service              | URL                       | Login                          |
+|----------------------|---------------------------|--------------------------------|
+| MinIO Console        | http://localhost:9001     | `thesisadmin` + vault password |
+| MinIO S3 API         | http://localhost:9000     | machine-only — browser redirects |
+| Kubeflow Pipelines   | http://localhost:8080     | none                           |
+| MLflow               | http://localhost:5000     | none                           |
+| Grafana              | http://localhost:3000     | not yet deployed (Playbook 08) |
+| Prometheus           | http://localhost:9090     | not yet deployed (Playbook 08) |
+| FastAPI `/docs`      | http://localhost:8000/docs | not yet deployed (Playbook 09) |
+
+### Cluster-internal addresses (for pod-to-pod traffic)
+
+These are the addresses your applications use, **not your browser**.
+
+| Service       | Internal address                                  |
+|---------------|---------------------------------------------------|
+| MinIO S3      | `http://minio.minio.svc.cluster.local:9000`       |
+| PostgreSQL    | `postgres.mlops.svc.cluster.local:5432`           |
+| MLflow        | `http://mlflow.mlops.svc.cluster.local:5000`      |
+| KFP API       | `http://ml-pipeline.kubeflow.svc.cluster.local:8888` |
+
+---
+
+## 3. Run Tests
+
+### Health snapshot (fast, ~5 seconds)
+
+```bash
+./scripts/healthcheck.sh
+```
+
+### Full test suite
+
+```bash
+./tests/run-all.sh                  # all 4 tiers (~2 min)
+./tests/run-all.sh 01-infra         # only infrastructure tier
+./tests/run-all.sh 02-connectivity  # only network/DNS tier
+./tests/run-all.sh 03-functional    # only functional tier
+```
+
+### Single test
+
+```bash
+./tests/03-functional/test-mlflow-smoke.sh
+./tests/03-functional/test-minio-rw.sh
+./tests/01-infra/test-namespaces.sh
+```
+
+### Save test output (useful for thesis appendix)
+
+```bash
+./tests/run-all.sh 2>&1 | tee /tmp/test-run-$(date +%Y%m%d-%H%M).log
+```
+
+### Reading output
+
+| Marker | Meaning                                       |
+|--------|-----------------------------------------------|
+| `PASS` | green — assertion held                        |
+| `FAIL` | red — assertion didn't hold (reason below)    |
+| `SKIP` | yellow — component not deployed yet           |
+| `INFO` | blue — informational only                     |
+
+---
+
+## 4. Common Kubernetes Inspection Commands
+
+```bash
+# What's running and where
+kubectl get pods -A                            # all pods, all namespaces
+kubectl get pods -n mlops                      # one namespace
+kubectl get svc -A                             # all services
+kubectl get pvc -A                             # all volumes
+
+# Resource usage
+kubectl top nodes                              # CPU + RAM of the VM
+kubectl top pods -A --sort-by=memory           # biggest RAM eaters
+free -h                                        # system memory
+
+# Why is a pod unhappy?
+kubectl describe pod <pod-name> -n <namespace>
+kubectl logs <pod-name> -n <namespace>
+kubectl logs <pod-name> -n <namespace> --tail=50 --follow
+
+# Get a shell inside a pod
+kubectl exec -it <pod-name> -n <namespace> -- bash
+kubectl exec -it postgres-0 -n mlops -- psql -U postgres
+```
+
+---
+
+## 5. Run Ansible Playbooks
+
+```bash
+# Single playbook (no secrets)
+ansible-playbook playbooks/01-system-prep.yml
+ansible-playbook playbooks/02-k3s.yml
+ansible-playbook playbooks/03-helm-tools.yml
+ansible-playbook playbooks/06-kfp-standalone.yml
+
+# Playbook with secrets (asks for vault password)
+ansible-playbook playbooks/04-minio.yml --ask-vault-pass
+ansible-playbook playbooks/05-postgres.yml --ask-vault-pass
+ansible-playbook playbooks/07-mlflow.yml --ask-vault-pass
+
+# Vault file management
+ansible-vault view inventory/group_vars/vault.yml      # read decrypted
+ansible-vault edit inventory/group_vars/vault.yml      # edit decrypted
+ansible-vault encrypt inventory/group_vars/vault.yml   # encrypt plain text
+```
+
+---
+
+## 6. Deployment Status
+
+| #  | Playbook              | Status   |
+|----|-----------------------|----------|
+| 01 | system-prep           | done     |
+| 02 | k3s                   | done     |
+| 03 | helm-tools            | done     |
+| 04 | minio                 | done     |
+| 05 | postgres              | done     |
+| 06 | kfp-standalone        | done     |
+| 07 | mlflow                | done     |
+| 08 | monitoring            | pending  |
+| 09 | fastapi               | pending  |
+
+---
+
+## 7. Git Workflow
+
+```bash
+git status                                     # what changed?
+git diff                                       # show changes
+git add -A && git commit -m "your message"
+git push origin main
+
+# Check the vault is encrypted before committing:
+head -1 inventory/group_vars/vault.yml         # must start with $ANSIBLE_VAULT
+```
+
+---
+
+## 8. Typical First-Look Sequence (5 minutes)
+
+After SSHing into the VM, do this to "get oriented":
+
+```bash
+cd /root/thesis-infra
+
+# 1. Is everything alive?
+./scripts/healthcheck.sh
+
+# 2. Open the UIs (laptop browser)
+./scripts/port-forward-all.sh
+
+# 3. Quick deep-check
+./tests/run-all.sh 01-infra
+```
+
+If all three are green, the platform is ready to use. Open in browser:
+- http://localhost:9001 (MinIO Console — see the 3 buckets)
+- http://localhost:5000 (MLflow — see experiments)
+- http://localhost:8080 (Kubeflow Pipelines)
+
+---
+
+## 9. Troubleshooting
+
+| Symptom                                     | Likely Fix                                    |
+|---------------------------------------------|-----------------------------------------------|
+| Browser shows nothing on http://localhost:X | port-forward not running — `./scripts/port-forward-all.sh` |
+| "port X already in use"                     | `./scripts/port-forward-all.sh stop` then start again |
+| `kubectl` shows pods Pending                | RAM/CPU pressure — `kubectl top nodes` to check |
+| Pod `CrashLoopBackOff`                      | `kubectl logs <pod> -n <ns> --tail=50`        |
+| `ansible-vault` says "no vault secrets"     | Add `--ask-vault-pass` to the playbook command |
+| VSCode tunnel broken                        | Reload window: `Ctrl+Shift+P` → "Reload Window" |
+
+---
+
+## 10. Useful Files
+
+| Path                                      | What it is                              |
+|-------------------------------------------|-----------------------------------------|
+| `README.md`                               | Project goal + architecture diagram     |
+| `inventory/group_vars/all.yml`            | All Ansible variables (versions, names) |
+| `inventory/group_vars/vault.yml`          | Encrypted secrets                       |
+| `playbooks/0X-*.yml`                      | The 9 Ansible playbooks                 |
+| `scripts/healthcheck.sh`                  | Fast health snapshot                    |
+| `scripts/port-forward-all.sh`             | Open all UIs to laptop                  |
+| `tests/run-all.sh`                        | Full test suite orchestrator            |
+| `tests/README.md`                         | Testing strategy + design principles    |
+| `docs/FIRST_LOOK.md`                      | This file                               |

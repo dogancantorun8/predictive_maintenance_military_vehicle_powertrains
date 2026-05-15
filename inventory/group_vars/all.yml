@@ -42,3 +42,10 @@ postgres_user: postgres
 postgres_databases:
   - mlflow
   - kfp
+
+# === MLflow ===
+mlflow_chart_version: "1.8.1"
+mlflow_release_name: "mlflow"
+mlflow_bucket: "thesis-mlflow"
+mlflow_db_name: "mlflow"
+mlflow_db_user: "postgres"

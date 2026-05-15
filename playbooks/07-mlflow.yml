@@ -1,0 +1,109 @@
+---
+# playbooks/07-mlflow.yml
+# Installs MLflow tracking server in the 'mlops' namespace.
+#
+# Architecture:
+#   - Backend store: PostgreSQL (from Playbook 05) — stores experiment metadata
+#   - Artifact store: MinIO (from Playbook 04), bucket: thesis-mlflow
+#   - Service: ClusterIP on port 5000, accessed via port-forward
+#
+# Uses community-charts/mlflow Helm chart (since Bitnami charts are deprecated).
+
+- name: Install MLflow tracking server
+  hosts: localhost
+  connection: local
+  become: true
+  vars_files:
+    - ../inventory/group_vars/all.yml
+    - ../inventory/group_vars/vault.yml
+
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+
+  tasks:
+    - name: Ensure mlops namespace exists
+      kubernetes.core.k8s:
+        api_version: v1
+        kind: Namespace
+        name: "{{ mlops_namespace }}"
+        state: present
+
+    - name: Add community-charts Helm repository
+      kubernetes.core.helm_repository:
+        name: community-charts
+        repo_url: https://community-charts.github.io/helm-charts
+
+    - name: Update Helm repos
+      command: /usr/local/bin/helm repo update
+      changed_when: false
+
+    - name: Install/upgrade MLflow chart
+      kubernetes.core.helm:
+        name: "{{ mlflow_release_name }}"
+        chart_ref: community-charts/mlflow
+        chart_version: "{{ mlflow_chart_version }}"
+        release_namespace: "{{ mlops_namespace }}"
+        create_namespace: false
+        wait: true
+        wait_timeout: 10m
+        values:
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+
+          backendStore:
+            databaseMigration: true
+            postgres:
+              enabled: true
+              host: "postgres.{{ mlops_namespace }}.svc.cluster.local"
+              port: 5432
+              database: "{{ mlflow_db_name }}"
+              user: "{{ mlflow_db_user }}"
+              password: "{{ vault_postgres_password }}"
+
+          artifactRoot:
+            s3:
+              enabled: true
+              bucket: "{{ mlflow_bucket }}"
+              awsAccessKeyId: "{{ vault_minio_user }}"
+              awsSecretAccessKey: "{{ vault_minio_password }}"
+
+          extraEnvVars:
+            MLFLOW_S3_ENDPOINT_URL: "http://minio.minio.svc.cluster.local:9000"
+            AWS_DEFAULT_REGION: "us-east-1"
+            MLFLOW_S3_IGNORE_TLS: "true"
+
+          service:
+            type: ClusterIP
+            port: 5000
+
+          postgresql:
+            enabled: false
+          mysql:
+            enabled: false
+
+    - name: Wait for MLflow pod to be Ready
+      shell: |
+        kubectl get pods -n {{ mlops_namespace }} -l app.kubernetes.io/name=mlflow \
+          -o jsonpath='{.items[0].status.conditions[?(@.type=="Ready")].status}'
+      register: mlflow_ready
+      until: mlflow_ready.stdout == "True"
+      retries: 30
+      delay: 10
+      changed_when: false
+
+    - name: Display verification info
+      debug:
+        msg: |
+          MLflow installed in namespace '{{ mlops_namespace }}'.
+          Service: mlflow.{{ mlops_namespace }}.svc.cluster.local:5000
+          Backend DB: postgres.{{ mlops_namespace }}.svc.cluster.local (database 'mlflow')
+          Artifacts:  s3://{{ mlflow_bucket }} (MinIO, via minio.minio.svc.cluster.local:9000)
+
+          To access the UI from your laptop:
+            kubectl port-forward -n {{ mlops_namespace }} svc/mlflow 5000:5000
+          Then open http://localhost:5000 in a browser.
