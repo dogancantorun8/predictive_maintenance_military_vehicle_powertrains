@@ -8,6 +8,7 @@ for svc_fqdn in \
   "minio.minio.svc.cluster.local" \
   "postgres.mlops.svc.cluster.local" \
   "mlflow.mlops.svc.cluster.local" \
+  "fastapi.mlops.svc.cluster.local" \
   "ml-pipeline.kubeflow.svc.cluster.local" \
   "prometheus-grafana.monitoring.svc.cluster.local" \
   "prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local" \
