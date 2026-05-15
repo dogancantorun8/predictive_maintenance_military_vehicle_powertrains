@@ -30,26 +30,38 @@ cd /root/thesis-infra
 
 ### Browser URLs (after port-forward is running)
 
-| Service              | URL                       | Login                          |
-|----------------------|---------------------------|--------------------------------|
-| MinIO Console        | http://localhost:9001     | `thesisadmin` + vault password |
-| MinIO S3 API         | http://localhost:9000     | machine-only — browser redirects |
-| Kubeflow Pipelines   | http://localhost:8080     | none                           |
-| MLflow               | http://localhost:5000     | none                           |
-| Grafana              | http://localhost:3000     | not yet deployed (Playbook 08) |
-| Prometheus           | http://localhost:9090     | not yet deployed (Playbook 08) |
-| FastAPI `/docs`      | http://localhost:8000/docs | not yet deployed (Playbook 09) |
+| Service              | URL                       | Login                                  |
+|----------------------|---------------------------|----------------------------------------|
+| MinIO Console        | http://localhost:9001     | `thesisadmin` + vault MinIO password   |
+| MinIO S3 API         | http://localhost:9000     | machine-only — browser redirects       |
+| Kubeflow Pipelines   | http://localhost:8080     | none                                   |
+| MLflow               | http://localhost:5000     | none                                   |
+| Grafana              | http://localhost:3000     | `admin` + vault Grafana password       |
+| Prometheus           | http://localhost:9090     | none                                   |
+| Alertmanager         | http://localhost:9093     | none                                   |
+| FastAPI `/docs`      | http://localhost:8000/docs | not yet deployed (Playbook 09)        |
+
+### Get the Grafana password (from encrypted vault)
+
+```bash
+ansible-vault view inventory/group_vars/vault.yml | grep grafana
+```
+
+Vault password is the one you set when running Playbooks 04+.
 
 ### Cluster-internal addresses (for pod-to-pod traffic)
 
 These are the addresses your applications use, **not your browser**.
 
-| Service       | Internal address                                  |
-|---------------|---------------------------------------------------|
-| MinIO S3      | `http://minio.minio.svc.cluster.local:9000`       |
-| PostgreSQL    | `postgres.mlops.svc.cluster.local:5432`           |
-| MLflow        | `http://mlflow.mlops.svc.cluster.local:5000`      |
-| KFP API       | `http://ml-pipeline.kubeflow.svc.cluster.local:8888` |
+| Service          | Internal address                                                       |
+|------------------|------------------------------------------------------------------------|
+| MinIO S3         | `http://minio.minio.svc.cluster.local:9000`                            |
+| PostgreSQL       | `postgres.mlops.svc.cluster.local:5432`                                |
+| MLflow           | `http://mlflow.mlops.svc.cluster.local:5000`                           |
+| KFP API          | `http://ml-pipeline.kubeflow.svc.cluster.local:8888`                   |
+| Prometheus       | `http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090` |
+| Grafana          | `http://prometheus-grafana.monitoring.svc.cluster.local:80`            |
+| Alertmanager     | `http://prometheus-kube-prometheus-alertmanager.monitoring.svc.cluster.local:9093` |
 
 ---
 
@@ -67,7 +79,7 @@ These are the addresses your applications use, **not your browser**.
 ./tests/run-all.sh                  # all 4 tiers (~2 min)
 ./tests/run-all.sh 01-infra         # only infrastructure tier
 ./tests/run-all.sh 02-connectivity  # only network/DNS tier
-./tests/run-all.sh 03-functional    # only functional tier
+./tests/run-all.sh 03-functional    # only functional tier (MinIO/PG/MLflow/KFP/Prom/Grafana/AM)
 ```
 
 ### Single test
@@ -75,6 +87,9 @@ These are the addresses your applications use, **not your browser**.
 ```bash
 ./tests/03-functional/test-mlflow-smoke.sh
 ./tests/03-functional/test-minio-rw.sh
+./tests/03-functional/test-prometheus-api.sh
+./tests/03-functional/test-grafana-api.sh
+./tests/03-functional/test-alertmanager-api.sh
 ./tests/01-infra/test-namespaces.sh
 ```
 
@@ -101,6 +116,7 @@ These are the addresses your applications use, **not your browser**.
 # What's running and where
 kubectl get pods -A                            # all pods, all namespaces
 kubectl get pods -n mlops                      # one namespace
+kubectl get pods -n monitoring                 # check Prometheus/Grafana stack
 kubectl get svc -A                             # all services
 kubectl get pvc -A                             # all volumes
 
@@ -134,6 +150,7 @@ ansible-playbook playbooks/06-kfp-standalone.yml
 ansible-playbook playbooks/04-minio.yml --ask-vault-pass
 ansible-playbook playbooks/05-postgres.yml --ask-vault-pass
 ansible-playbook playbooks/07-mlflow.yml --ask-vault-pass
+ansible-playbook playbooks/08-monitoring.yml --ask-vault-pass
 
 # Vault file management
 ansible-vault view inventory/group_vars/vault.yml      # read decrypted
@@ -145,17 +162,17 @@ ansible-vault encrypt inventory/group_vars/vault.yml   # encrypt plain text
 
 ## 6. Deployment Status
 
-| #  | Playbook              | Status   |
-|----|-----------------------|----------|
-| 01 | system-prep           | done     |
-| 02 | k3s                   | done     |
-| 03 | helm-tools            | done     |
-| 04 | minio                 | done     |
-| 05 | postgres              | done     |
-| 06 | kfp-standalone        | done     |
-| 07 | mlflow                | done     |
-| 08 | monitoring            | pending  |
-| 09 | fastapi               | pending  |
+| #  | Playbook              | Status   | Pods deployed                                      |
+|----|-----------------------|----------|----------------------------------------------------|
+| 01 | system-prep           | done     | n/a (host-level config)                            |
+| 02 | k3s                   | done     | 3 in kube-system (coredns, local-path, metrics)    |
+| 03 | helm-tools            | done     | n/a (CLI tools)                                    |
+| 04 | minio                 | done     | 1 in minio                                         |
+| 05 | postgres              | done     | 1 in mlops (postgres-0)                            |
+| 06 | kfp-standalone        | done     | 14 in kubeflow                                     |
+| 07 | mlflow                | done     | 1 in mlops (mlflow-...)                            |
+| 08 | monitoring            | done     | 6 in monitoring (Prom + Grafana + AM + exporters)  |
+| 09 | fastapi               | pending  | 1 in mlops (planned)                               |
 
 ---
 
@@ -194,6 +211,8 @@ If all three are green, the platform is ready to use. Open in browser:
 - http://localhost:9001 (MinIO Console — see the 3 buckets)
 - http://localhost:5000 (MLflow — see experiments)
 - http://localhost:8080 (Kubeflow Pipelines)
+- http://localhost:3000 (Grafana — see Kubernetes dashboards)
+- http://localhost:9090 (Prometheus — see scrape targets)
 
 ---
 
@@ -203,10 +222,12 @@ If all three are green, the platform is ready to use. Open in browser:
 |---------------------------------------------|-----------------------------------------------|
 | Browser shows nothing on http://localhost:X | port-forward not running — `./scripts/port-forward-all.sh` |
 | "port X already in use"                     | `./scripts/port-forward-all.sh stop` then start again |
+| `./scripts/port-forward-all.sh status` shows `(none)` but ports are listening | Old kubectl process held the port — `pkill -9 -f "kubectl port-forward"` then restart |
 | `kubectl` shows pods Pending                | RAM/CPU pressure — `kubectl top nodes` to check |
 | Pod `CrashLoopBackOff`                      | `kubectl logs <pod> -n <ns> --tail=50`        |
 | `ansible-vault` says "no vault secrets"     | Add `--ask-vault-pass` to the playbook command |
 | VSCode tunnel broken                        | Reload window: `Ctrl+Shift+P` → "Reload Window" |
+| Grafana login fails                         | Get password: `ansible-vault view inventory/group_vars/vault.yml \| grep grafana` |
 
 ---
 
@@ -218,6 +239,7 @@ If all three are green, the platform is ready to use. Open in browser:
 | `inventory/group_vars/all.yml`            | All Ansible variables (versions, names) |
 | `inventory/group_vars/vault.yml`          | Encrypted secrets                       |
 | `playbooks/0X-*.yml`                      | The 9 Ansible playbooks                 |
+| `files/monitoring/kube-prometheus-stack-values.yaml` | Helm values for Playbook 08    |
 | `scripts/healthcheck.sh`                  | Fast health snapshot                    |
 | `scripts/port-forward-all.sh`             | Open all UIs to laptop                  |
 | `tests/run-all.sh`                        | Full test suite orchestrator            |
