@@ -18,7 +18,7 @@ cd /root/thesis-infra
 ## 1. Start Port-Forwards (access from your laptop browser)
 
 ```bash
-./scripts/port-forward-all.sh           # start all available services
+./scripts/port-forward-all.sh           # start all 8 services
 ./scripts/port-forward-all.sh status    # check what's running
 ./scripts/port-forward-all.sh stop      # kill all forwards
 ./scripts/port-forward-all.sh restart   # stop + start
@@ -39,7 +39,9 @@ cd /root/thesis-infra
 | Grafana              | http://localhost:3000     | `admin` + vault Grafana password       |
 | Prometheus           | http://localhost:9090     | none                                   |
 | Alertmanager         | http://localhost:9093     | none                                   |
-| FastAPI `/docs`      | http://localhost:8000/docs | not yet deployed (Playbook 09)        |
+| FastAPI root         | http://localhost:8000     | none (JSON service info)               |
+| FastAPI Swagger UI   | http://localhost:8000/docs | none (interactive API)                |
+| FastAPI metrics      | http://localhost:8000/metrics | none (Prometheus format)            |
 
 ### Get the Grafana password (from encrypted vault)
 
@@ -58,6 +60,7 @@ These are the addresses your applications use, **not your browser**.
 | MinIO S3         | `http://minio.minio.svc.cluster.local:9000`                            |
 | PostgreSQL       | `postgres.mlops.svc.cluster.local:5432`                                |
 | MLflow           | `http://mlflow.mlops.svc.cluster.local:5000`                           |
+| FastAPI          | `http://fastapi.mlops.svc.cluster.local:8000`                          |
 | KFP API          | `http://ml-pipeline.kubeflow.svc.cluster.local:8888`                   |
 | Prometheus       | `http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090` |
 | Grafana          | `http://prometheus-grafana.monitoring.svc.cluster.local:80`            |
@@ -73,7 +76,7 @@ These are the addresses your applications use, **not your browser**.
 ./scripts/healthcheck.sh
 ```
 
-### Full test suite
+### Full test suite (35+ assertions)
 
 ```bash
 ./tests/run-all.sh                  # all 4 tiers (~2 min)
@@ -91,6 +94,7 @@ These are the addresses your applications use, **not your browser**.
 ./tests/03-functional/test-grafana-api.sh
 ./tests/03-functional/test-alertmanager-api.sh
 ./tests/03-functional/test-dvc-data.sh
+./tests/03-functional/test-fastapi.sh
 ./tests/01-infra/test-namespaces.sh
 ```
 
@@ -116,7 +120,7 @@ These are the addresses your applications use, **not your browser**.
 ```bash
 # What's running and where
 kubectl get pods -A                            # all pods, all namespaces
-kubectl get pods -n mlops                      # one namespace
+kubectl get pods -n mlops                      # postgres + mlflow + fastapi
 kubectl get pods -n monitoring                 # check Prometheus/Grafana stack
 kubectl get svc -A                             # all services
 kubectl get pvc -A                             # all volumes
@@ -152,6 +156,7 @@ ansible-playbook playbooks/04-minio.yml --ask-vault-pass
 ansible-playbook playbooks/05-postgres.yml --ask-vault-pass
 ansible-playbook playbooks/07-mlflow.yml --ask-vault-pass
 ansible-playbook playbooks/08-monitoring.yml --ask-vault-pass
+ansible-playbook playbooks/09-fastapi.yml --ask-vault-pass
 ansible-playbook playbooks/10-data-and-dev-env.yml --ask-vault-pass
 
 # Vault file management
@@ -174,12 +179,78 @@ ansible-vault encrypt inventory/group_vars/vault.yml   # encrypt plain text
 | 06 | kfp-standalone        | done     | 14 in kubeflow                                     |
 | 07 | mlflow                | done     | 1 in mlops (mlflow-...)                            |
 | 08 | monitoring            | done     | 6 in monitoring (Prom + Grafana + AM + exporters)  |
-| 09 | fastapi               | pending  | 1 in mlops (planned)                               |
+| 09 | fastapi               | done     | 1 in mlops (fastapi-...)                           |
 | 10 | data-and-dev-env      | done     | .venv + 13 C-MAPSS files (DVC, MinIO sync)         |
+
+**Total**: 27 pods running across 5 namespaces. All 10 playbooks complete (9/9 infrastructure + 1 dev env).
 
 ---
 
-## 7. DVC Operations (data versioning)
+## 7. FastAPI Operations (inference service)
+
+### Test endpoints from the VM
+
+```bash
+# Service info
+curl -s http://localhost:8000/ | python3 -m json.tool
+
+# Health & readiness
+curl -s http://localhost:8000/healthz
+curl -s http://localhost:8000/readyz
+
+# Make a prediction (21 C-MAPSS sensor features)
+curl -s -X POST http://localhost:8000/predict \
+  -H 'Content-Type: application/json' \
+  -d '{"features":[0.0023,-0.0003,100.0,518.67,641.82,1589.7,1400.6,14.62,21.61,554.36,2388.06,9046.19,1.3,47.47,521.66,2388.02,8138.62,8.4195,0.03,392,2388]}'
+
+# Prometheus metrics (counters, histograms)
+curl -s http://localhost:8000/metrics | head -30
+```
+
+### Stub model vs real model
+
+FastAPI starts with a **stub** that returns `RUL=125.0` until you register
+a real model in MLflow under name `cmapss-rul` with stage `Production`.
+
+The `/` endpoint shows the current state:
+
+```json
+{
+  "service": "C-MAPSS RUL Inference",
+  "model_name": "cmapss-rul",
+  "model_stage": "Production",
+  "model_version": "stub",   // ← becomes "1", "2" etc. once trained
+  "is_stub": true            // ← becomes false once trained
+}
+```
+
+### Load a trained model
+
+Once you train and register a model:
+
+```bash
+# Restart FastAPI deployment to reload model from MLflow
+kubectl rollout restart deployment/fastapi -n mlops
+
+# Verify new model is loaded
+curl -s http://localhost:8000/ | python3 -m json.tool
+# is_stub: false, model_version: "1" (or higher)
+```
+
+### Rebuild the image (after editing files/fastapi/app/main.py)
+
+The entire build is wrapped in Playbook 09 — just rerun it:
+
+```bash
+ansible-playbook playbooks/09-fastapi.yml --ask-vault-pass
+```
+
+The playbook detects code changes via the rolling restart at the end and
+deploys the new image automatically.
+
+---
+
+## 8. DVC Operations (data versioning)
 
 ### Activate the Python venv first
 
@@ -222,7 +293,7 @@ dvc pull
 
 ---
 
-## 8. Git Workflow
+## 9. Git Workflow
 
 ```bash
 git status                                     # what changed?
@@ -243,7 +314,7 @@ git push origin main
 
 ---
 
-## 9. Typical First-Look Sequence (5 minutes)
+## 10. Typical First-Look Sequence (5 minutes)
 
 After SSHing into the VM, do this to "get oriented":
 
@@ -262,6 +333,9 @@ cd /root/thesis-infra
 # 4. Activate venv if you'll work with Python/DVC
 source .venv/bin/activate
 dvc status
+
+# 5. Verify FastAPI is serving
+curl -s http://localhost:8000/healthz
 ```
 
 If all checks are green, the platform is ready. Open in browser:
@@ -270,10 +344,11 @@ If all checks are green, the platform is ready. Open in browser:
 - http://localhost:8080 (Kubeflow Pipelines)
 - http://localhost:3000 (Grafana — see Kubernetes dashboards)
 - http://localhost:9090 (Prometheus — see scrape targets)
+- http://localhost:8000/docs (FastAPI Swagger UI — interactive `/predict`)
 
 ---
 
-## 10. Troubleshooting
+## 11. Troubleshooting
 
 | Symptom                                     | Likely Fix                                    |
 |---------------------------------------------|-----------------------------------------------|
@@ -288,19 +363,25 @@ If all checks are green, the platform is ready. Open in browser:
 | `dvc push` fails with auth error            | Make sure port-forward 9000 is up: `./scripts/port-forward-all.sh status \| grep 9000` |
 | `dvc init` fails with `_DIR_MARK` import    | DVC < 3.59 has a pathspec bug — upgrade via Playbook 10 |
 | C-MAPSS download error in Playbook 10       | NASA wraps files in a doubly-nested zip; Playbook 10 handles both layers |
+| FastAPI shows `is_stub: true` after training | `kubectl rollout restart deployment/fastapi -n mlops` |
+| FastAPI image build fails (buildkit not found) | apt has no buildkit on Ubuntu 22.04 — Playbook 09 installs binary release |
+| Prometheus doesn't show `up{job="fastapi"}` | Wait ~60s after deploy, ServiceMonitor scrape interval is 30s |
 
 ---
 
-## 11. Useful Files
+## 12. Useful Files
 
 | Path                                              | What it is                              |
 |---------------------------------------------------|-----------------------------------------|
 | `README.md`                                       | Project goal + architecture diagram     |
 | `inventory/group_vars/all.yml`                    | All Ansible variables (versions, names) |
 | `inventory/group_vars/vault.yml`                  | Encrypted secrets                       |
-| `playbooks/0X-*.yml`                              | The 9+1 Ansible playbooks               |
+| `playbooks/0X-*.yml`                              | The 10 Ansible playbooks                |
 | `files/monitoring/kube-prometheus-stack-values.yaml` | Helm values for Playbook 08          |
 | `files/data/requirements.txt`                     | Python deps for Playbook 10             |
+| `files/fastapi/Dockerfile`                        | FastAPI multi-stage build               |
+| `files/fastapi/app/main.py`                       | FastAPI application (200 lines)         |
+| `files/fastapi/k8s/*.yaml`                        | FastAPI K8s manifests (3 files)         |
 | `.dvc/config`                                     | DVC remote (MinIO) configuration        |
 | `data/raw/cmapss.dvc`                             | DVC metadata pointer (data is in MinIO) |
 | `scripts/healthcheck.sh`                          | Fast health snapshot                    |

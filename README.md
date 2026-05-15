@@ -20,7 +20,7 @@ All components are 100% open source and run on a single Hetzner VM, making the s
 
 **Deployment target:** Hetzner Cloud CCX23 (4 dedicated vCPU · 16 GB RAM · 160 GB NVMe SSD · Ubuntu 22.04 LTS · Falkenstein, Germany).
 
-**Provisioning time:** A blank VM reaches a fully running MLOps stack via `ansible-playbook site.yml` in approximately 50 minutes, plus a `dvc pull` to restore the dataset from MinIO.
+**Provisioning time:** A blank VM reaches a fully running MLOps stack via 10 idempotent Ansible playbooks in approximately 50 minutes, plus a `dvc pull` to restore the dataset from MinIO. Every operational artifact — including the FastAPI image build — is version-controlled and reproducible; nothing is bootstrapped manually.
 
 ---
 
@@ -54,10 +54,10 @@ flowchart TB
                 MIO --> SVC1
             end
 
-            subgraph MLOPS["mlops namespace (Playbooks 05, 07) — PARTIAL"]
-                PG["PostgreSQL — DEPLOYED<br/>postgres-0 · 10 Gi PVC<br/>databases: mlflow, kfp"]
-                MLF["MLflow — DEPLOYED<br/>tracking + Model Registry<br/>backend: postgres · artifacts: minio"]
-                FA["FastAPI — PENDING (Playbook 09)<br/>REST inference endpoint /predict"]
+            subgraph MLOPS["mlops namespace (Playbooks 05, 07, 09) — DEPLOYED"]
+                PG["PostgreSQL<br/>postgres-0 · 10 Gi PVC<br/>databases: mlflow, kfp"]
+                MLF["MLflow<br/>tracking + Model Registry<br/>backend: postgres · artifacts: minio"]
+                FA["FastAPI<br/>REST inference endpoint /predict<br/>stub model: RUL=125 until trained<br/>Prometheus /metrics scraped"]
             end
 
             subgraph KF["kubeflow namespace (Playbook 06) — DEPLOYED"]
@@ -65,7 +65,7 @@ flowchart TB
             end
 
             subgraph MON["monitoring namespace (Playbook 08) — DEPLOYED"]
-                PROM["Prometheus (kube-prometheus-stack 85.0.3)<br/>10 Gi PVC · 5d retention · 13 UP targets<br/>scrapes all namespaces"]
+                PROM["Prometheus (kube-prometheus-stack 85.0.3)<br/>10 Gi PVC · 5d retention · 15 UP targets<br/>scrapes all namespaces incl. FastAPI"]
                 GRAF["Grafana<br/>5 Gi PVC · 25+ pre-built dashboards<br/>admin password from vault"]
                 AM["Alertmanager<br/>2 Gi PVC · webhook receiver<br/>(will trigger KFP retraining on drift)"]
                 EVI["Evidently CronJob — PENDING<br/>(hourly drift score: PSI + KS)"]
@@ -77,12 +77,16 @@ flowchart TB
             DVC["DVC tracking<br/>data/raw/cmapss/ → 13 .txt files (gitignored)<br/>data/raw/cmapss.dvc → 300-byte metadata (in Git)<br/>Remote: s3://thesis-data/dvc/ (MinIO)<br/>15 objects pushed"]
         end
 
+        subgraph BUILD["Image build (Playbook 09) — DEPLOYED"]
+            ND["nerdctl 1.7.7 + buildkit 0.15.2<br/>Single-binary tools, no Docker daemon<br/>Builds directly into k3s containerd k8s.io namespace"]
+        end
+
         subgraph TOOLS["Tooling (Playbook 03) — DEPLOYED"]
             T1["Helm v3.20.2 · kustomize v5.4.3<br/>Helm repos: bitnami · prometheus-community · community · minio<br/>kubectl plugins (krew): ctx · ns · neat"]
         end
 
         subgraph IAC["Infrastructure as Code"]
-            I1["Ansible (connection: local · VM-local execution)<br/>9 modular playbooks · idempotent · ~50 min full install<br/>ansible-vault: AES256 (MinIO / Postgres / Grafana pwds)"]
+            I1["Ansible (connection: local · VM-local execution)<br/>10 modular playbooks (01-10) · idempotent · ~50 min full install<br/>ansible-vault: AES256 (MinIO / Postgres / Grafana pwds)"]
         end
     end
 
@@ -96,8 +100,7 @@ flowchart TB
     classDef partial fill:#fff3cd,stroke:#ffc107,color:#856404
     classDef external fill:#cce5ff,stroke:#0066cc,color:#004085
 
-    class SYS,MINIO,KF,MON,TOOLS,IAC,DEV done
-    class MLOPS partial
+    class SYS,MINIO,KF,MON,TOOLS,IAC,DEV,BUILD,MLOPS done
     class LAPTOP,GH external
 ```
 
@@ -109,19 +112,21 @@ flowchart TB
 
 3. **minio namespace**: S3-compatible object storage. Hosts three buckets that back DVC (data versioning), MLflow (experiment artifacts), and the FastAPI model cache. All MLOps state lives here.
 
-4. **mlops namespace**: The core thesis layer. PostgreSQL stores metadata; MLflow tracks every training run and serves as the Model Registry; FastAPI (pending Playbook 09) loads the current Production-stage model and exposes a `/predict` REST endpoint.
+4. **mlops namespace**: The core thesis layer. PostgreSQL stores metadata; MLflow tracks every training run and serves as the Model Registry; FastAPI loads the current Production-stage model from MLflow and exposes `/predict`, `/healthz`, `/readyz`, `/metrics` endpoints. Until a real model is registered, FastAPI runs with a stub that returns RUL=125.0, allowing the full platform to be tested end-to-end.
 
 5. **kubeflow namespace**: Kubeflow Pipelines Standalone — pipeline orchestration only. Notebooks, Katib, KServe, Dex, Istio are deliberately omitted; they would consume ~4 GB extra RAM and add no thesis value. Replaced by VSCode Remote-SSH (notebooks), Optuna (HP search), and FastAPI (serving).
 
-6. **monitoring namespace**: Prometheus scrapes pod metrics across all namespaces (currently 13 UP scrape targets); Grafana visualizes them through 25+ pre-built Kubernetes dashboards. Alertmanager fires webhooks on threshold breach — once the Evidently CronJob is added, this becomes the trigger for the closed-loop retraining cycle.
+6. **monitoring namespace**: Prometheus scrapes pod metrics across all namespaces (currently 15 UP scrape targets including FastAPI via ServiceMonitor); Grafana visualizes them through 25+ pre-built Kubernetes dashboards. Alertmanager fires webhooks on threshold breach — once the Evidently CronJob is added, this becomes the trigger for the closed-loop retraining cycle.
 
 7. **Dev environment & DVC**: A Python 3.12 virtual environment with DVC, MLflow, PyTorch (CPU), Evidently, and Optuna. The C-MAPSS dataset is versioned by DVC — the 13 `.txt` files (~17 MB) live in MinIO bucket `thesis-data/dvc/`, while only a 300-byte metadata pointer (`cmapss.dvc`) is committed to Git. Reproducing the exact dataset used by any commit is a two-step recipe: `git checkout <hash>` then `dvc pull`.
 
-8. **Ansible**: Provisioning runs on the VM itself (`connection: local`). No tooling on the laptop. Each playbook is idempotent and component-scoped, so a failure can be debugged in isolation. Secrets are stored encrypted via `ansible-vault`.
+8. **Image build layer**: The FastAPI image is built with `nerdctl` (containerd-native CLI) and `buildkit` (image builder), installed as single binaries from upstream GitHub releases. The image is built directly into k3s's containerd `k8s.io` namespace and consumed with `imagePullPolicy: Never` — no Docker daemon, no external registry, no `ctr import` step required. This decision saves ~150 MB RAM compared to running a parallel Docker daemon and eliminates the need for registry authentication.
 
-9. **Laptop**: Used only for SSH-based development through VSCode Remote-SSH and for opening port-forwarded UIs in a browser. No Docker, Python, kubectl, or Ansible is installed locally.
+9. **Ansible**: Provisioning runs on the VM itself (`connection: local`). No tooling on the laptop. Each playbook is idempotent and component-scoped, so a failure can be debugged in isolation. Secrets are stored encrypted via `ansible-vault`.
 
-10. **GitHub**: Public source of truth. The encrypted vault file is committed — the AES256 ciphertext is safe to publish; only someone with the vault password can decrypt it. Raw data is excluded from Git (versioned by DVC instead).
+10. **Laptop**: Used only for SSH-based development through VSCode Remote-SSH and for opening port-forwarded UIs in a browser. No Docker, Python, kubectl, or Ansible is installed locally.
+
+11. **GitHub**: Public source of truth. The encrypted vault file is committed — the AES256 ciphertext is safe to publish; only someone with the vault password can decrypt it. Raw data is excluded from Git (versioned by DVC instead).
 
 ---
 
@@ -181,13 +186,22 @@ thesis-infra/
 │   ├── 06-kfp-standalone.yml   # Kubeflow Pipelines                 [done]
 │   ├── 07-mlflow.yml           # Experiment tracking + Registry     [done]
 │   ├── 08-monitoring.yml       # Prometheus + Grafana + Alertmanager [done]
-│   ├── 09-fastapi.yml          # Inference REST endpoint            [pending]
+│   ├── 09-fastapi.yml          # Inference REST endpoint            [done]
 │   └── 10-data-and-dev-env.yml # Python venv + C-MAPSS + DVC        [done]
 │
-├── files/                      # Static configs (Helm values, init SQL, etc.)
+├── files/                      # Static configs (Helm values, manifests, app code)
 │   ├── postgres/               # PostgreSQL init SQL
 │   ├── monitoring/             # kube-prometheus-stack values.yaml
-│   └── data/                   # requirements.txt (Python deps)
+│   ├── data/                   # Python requirements.txt
+│   └── fastapi/                # FastAPI service
+│       ├── Dockerfile          # Multi-stage build, ~200 MB
+│       ├── app/
+│       │   ├── main.py         # FastAPI app (200 lines)
+│       │   └── requirements.txt
+│       └── k8s/
+│           ├── deployment.yaml
+│           ├── service.yaml
+│           └── servicemonitor.yaml
 │
 ├── data/                       # Project data (mostly gitignored)
 │   ├── raw/
@@ -204,14 +218,14 @@ thesis-infra/
 │   ├── healthcheck.sh          # Fast cluster health snapshot
 │   └── port-forward-all.sh     # Open all UIs to laptop
 │
-├── tests/                      # Hierarchical test suite
+├── tests/                      # Hierarchical test suite (35+ assertions)
 │   ├── README.md               # Testing strategy + design principles
 │   ├── _lib.sh                 # Common helpers (pass/fail/skip + assertions)
 │   ├── run-all.sh              # Orchestrator
 │   ├── 01-infra/               # Pod/PVC/node-level tests
 │   ├── 02-connectivity/        # DNS + cross-pod reachability
 │   ├── 03-functional/          # MinIO/Postgres/MLflow/KFP/Prometheus/
-│   │                           # Grafana/Alertmanager/DVC R/W and API
+│   │                           # Grafana/Alertmanager/DVC/FastAPI tests
 │   └── 99-integration/         # End-to-end scenarios (planned)
 │
 └── docs/                       # Operational documentation
