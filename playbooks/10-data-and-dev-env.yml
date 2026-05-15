@@ -1,0 +1,308 @@
+---
+# playbooks/10-data-and-dev-env.yml
+# Python dev environment + C-MAPSS dataset download + DVC version control.
+#
+# NASA C-MAPSS archive is doubly nested:
+#   outer.zip → "6. Turbofan ... /CMAPSSData.zip" → 13 .txt files
+# This playbook handles both layers and lands files in a flat directory.
+# Idempotent: rerunning is safe.
+
+- name: Set up Python dev environment and version-control C-MAPSS data
+  hosts: localhost
+  connection: local
+  become: true
+  vars_files:
+    - ../inventory/group_vars/all.yml
+    - ../inventory/group_vars/vault.yml
+
+  vars:
+    thesis_repo: "/root/thesis-infra"
+    cmapss_outer_zip: "/tmp/cmapss-outer.zip"
+    cmapss_staging_dir: "/tmp/cmapss-staging"
+
+  tasks:
+    # ===========================================================
+    # PART 1: Python venv + dependencies
+    # ===========================================================
+    - name: Install Python {{ python_version }} and venv support
+      apt:
+        name:
+          - "python{{ python_version }}"
+          - "python{{ python_version }}-venv"
+          - "python{{ python_version }}-dev"
+          - unzip
+        state: present
+        update_cache: yes
+
+    - name: Create Python virtual environment at {{ venv_path }}
+      command: "python{{ python_version }} -m venv {{ venv_path }}"
+      args:
+        creates: "{{ venv_path }}/bin/python"
+
+    - name: Upgrade pip in venv
+      pip:
+        name: pip
+        state: latest
+        virtualenv: "{{ venv_path }}"
+
+    - name: Install/upgrade Python requirements (DVC, MLflow, PyTorch, etc.)
+      pip:
+        requirements: "{{ thesis_repo }}/files/data/requirements.txt"
+        virtualenv: "{{ venv_path }}"
+        state: present
+        extra_args: "--upgrade"
+
+    - name: Verify DVC is installed
+      command: "{{ venv_path }}/bin/dvc --version"
+      register: dvc_version
+      changed_when: false
+
+    - name: Show DVC version
+      debug:
+        msg: "DVC installed: {{ dvc_version.stdout }}"
+
+    # ===========================================================
+    # PART 2: Download and extract C-MAPSS dataset
+    # ===========================================================
+    - name: Create data directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0755'
+      loop:
+        - "{{ cmapss_data_dir }}"
+        - "{{ thesis_repo }}/data/processed"
+
+    - name: Check if C-MAPSS data is already extracted (idempotent guard)
+      stat:
+        path: "{{ cmapss_data_dir }}/train_FD001.txt"
+      register: cmapss_exists
+
+    - name: Ensure clean staging directory
+      file:
+        path: "{{ cmapss_staging_dir }}"
+        state: absent
+      when: not cmapss_exists.stat.exists
+
+    - name: Create staging directory
+      file:
+        path: "{{ cmapss_staging_dir }}"
+        state: directory
+        mode: '0755'
+      when: not cmapss_exists.stat.exists
+
+    - name: Download C-MAPSS outer zip from NASA PHM Data Repository
+      get_url:
+        url: "{{ cmapss_url }}"
+        dest: "{{ cmapss_outer_zip }}"
+        mode: '0644'
+        timeout: 120
+      when: not cmapss_exists.stat.exists
+
+    - name: Extract outer zip to staging
+      unarchive:
+        src: "{{ cmapss_outer_zip }}"
+        dest: "{{ cmapss_staging_dir }}"
+        remote_src: yes
+      when: not cmapss_exists.stat.exists
+
+    - name: Locate inner CMAPSSData.zip
+      find:
+        paths: "{{ cmapss_staging_dir }}"
+        patterns: "CMAPSSData.zip"
+        recurse: yes
+      register: inner_zip_search
+      when: not cmapss_exists.stat.exists
+
+    - name: Fail if inner zip not found (NASA archive structure changed)
+      fail:
+        msg: |
+          Inner CMAPSSData.zip not found inside the outer archive.
+          NASA may have changed the archive layout. Inspect:
+            {{ cmapss_staging_dir }}
+      when:
+        - not cmapss_exists.stat.exists
+        - inner_zip_search.matched == 0
+
+    - name: Extract inner CMAPSSData.zip directly to final data directory
+      unarchive:
+        src: "{{ inner_zip_search.files[0].path }}"
+        dest: "{{ cmapss_data_dir }}"
+        remote_src: yes
+      when:
+        - not cmapss_exists.stat.exists
+        - inner_zip_search.matched > 0
+
+    - name: Clean up staging directory and outer zip
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ cmapss_staging_dir }}"
+        - "{{ cmapss_outer_zip }}"
+
+    # ===========================================================
+    # PART 3: Verify the data
+    # ===========================================================
+    - name: Find all .txt data files
+      find:
+        paths: "{{ cmapss_data_dir }}"
+        patterns: "*.txt"
+      register: cmapss_files
+
+    - name: Assert all 13 expected files are present
+      assert:
+        that:
+          - cmapss_files.matched >= 13
+        fail_msg: "Expected at least 13 .txt files, found {{ cmapss_files.matched }}"
+        success_msg: "Found {{ cmapss_files.matched }} C-MAPSS data files"
+
+    - name: Show the data file list
+      debug:
+        msg: "{{ cmapss_files.files | map(attribute='path') | map('basename') | sort | list }}"
+
+    # ===========================================================
+    # PART 4: DVC initialization + remote configuration
+    # ===========================================================
+    - name: Check if DVC is already initialized
+      stat:
+        path: "{{ thesis_repo }}/.dvc/config"
+      register: dvc_initialized
+
+    - name: Initialize DVC in {{ thesis_repo }}
+      command: "{{ venv_path }}/bin/dvc init"
+      args:
+        chdir: "{{ thesis_repo }}"
+      when: not dvc_initialized.stat.exists
+
+    - name: Configure DVC remote (MinIO)
+      command: >
+        {{ venv_path }}/bin/dvc remote add -d -f
+        {{ dvc_remote_name }}
+        {{ dvc_remote_url }}
+      args:
+        chdir: "{{ thesis_repo }}"
+      changed_when: true
+
+    - name: Configure DVC remote — endpoint (localhost via port-forward)
+      command: >
+        {{ venv_path }}/bin/dvc remote modify {{ dvc_remote_name }}
+        endpointurl http://localhost:9000
+      args:
+        chdir: "{{ thesis_repo }}"
+      changed_when: true
+
+    - name: Configure DVC remote — access key (local, vault sourced)
+      command: >
+        {{ venv_path }}/bin/dvc remote modify --local {{ dvc_remote_name }}
+        access_key_id {{ vault_minio_user }}
+      args:
+        chdir: "{{ thesis_repo }}"
+      changed_when: true
+      no_log: true
+
+    - name: Configure DVC remote — secret key (local, vault sourced)
+      command: >
+        {{ venv_path }}/bin/dvc remote modify --local {{ dvc_remote_name }}
+        secret_access_key {{ vault_minio_password }}
+      args:
+        chdir: "{{ thesis_repo }}"
+      changed_when: true
+      no_log: true
+
+    - name: Disable SSL for MinIO (HTTP endpoint)
+      command: >
+        {{ venv_path }}/bin/dvc remote modify {{ dvc_remote_name }}
+        use_ssl false
+      args:
+        chdir: "{{ thesis_repo }}"
+      changed_when: true
+
+    # ===========================================================
+    # PART 5: Update .gitignore
+    # ===========================================================
+    - name: Ensure data files and venv are gitignored
+      blockinfile:
+        path: "{{ thesis_repo }}/.gitignore"
+        marker: "# {mark} ANSIBLE MANAGED — Playbook 10 (data + dev env)"
+        block: |
+          # Python venv
+          .venv/
+
+          # Raw and processed data (versioned by DVC, not Git)
+          /data/raw/cmapss/
+          /data/processed/
+
+          # DVC cache and local config
+          /.dvc/cache
+          /.dvc/tmp
+          /.dvc/config.local
+
+          # Jupyter
+          .ipynb_checkpoints/
+          *.ipynb_checkpoints
+        create: yes
+
+    # ===========================================================
+    # PART 6: DVC add + push
+    # ===========================================================
+    - name: Check if MinIO port-forward is running
+      shell: ss -tln 2>/dev/null | grep -q ":9000 " && echo "yes" || echo "no"
+      register: minio_pf
+      changed_when: false
+
+    - name: Warn if MinIO port-forward not running
+      debug:
+        msg: |
+          MinIO port-forward NOT detected on localhost:9000.
+          Run before retrying 'dvc push':
+            ./scripts/port-forward-all.sh
+      when: minio_pf.stdout == "no"
+
+    - name: Add C-MAPSS data to DVC tracking
+      command: "{{ venv_path }}/bin/dvc add data/raw/cmapss"
+      args:
+        chdir: "{{ thesis_repo }}"
+        creates: "{{ thesis_repo }}/data/raw/cmapss.dvc"
+      register: dvc_add
+
+    - name: Display DVC add output
+      debug:
+        var: dvc_add.stdout_lines
+
+    - name: Push data to MinIO
+      command: "{{ venv_path }}/bin/dvc push"
+      args:
+        chdir: "{{ thesis_repo }}"
+      when: minio_pf.stdout == "yes"
+      register: dvc_push
+      changed_when: "'pushed' in (dvc_push.stdout | default(''))"
+      ignore_errors: true
+
+    - name: Display DVC push output
+      debug:
+        var: dvc_push.stdout_lines
+      when: dvc_push is defined and dvc_push.stdout_lines is defined
+
+    # ===========================================================
+    # PART 7: Summary
+    # ===========================================================
+    - name: Display final summary
+      debug:
+        msg: |
+          Playbook 10 complete.
+
+          Python venv:   {{ venv_path }}
+          DVC version:   {{ dvc_version.stdout }}
+          Data dir:      {{ cmapss_data_dir }}
+          Files found:   {{ cmapss_files.matched }} .txt files
+          DVC remote:    {{ dvc_remote_name }} → {{ dvc_remote_url }}
+          DVC tracking:  data/raw/cmapss.dvc
+
+          Next steps:
+            source {{ venv_path }}/bin/activate
+            dvc remote list
+            dvc status
+            git add data/raw/cmapss.dvc .dvc/config .gitignore
+            git commit -m "Add C-MAPSS data tracking via DVC"
+            git push origin main

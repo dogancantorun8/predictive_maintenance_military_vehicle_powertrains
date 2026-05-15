@@ -3,3 +3,21 @@
 __pycache__/
 .venv/
 inventory/group_vars/vault.yml
+# BEGIN ANSIBLE MANAGED — Playbook 10 (data + dev env)
+# Python venv
+.venv/
+
+# Raw and processed data (versioned by DVC, not Git)
+/data/raw/cmapss/
+/data/processed/
+
+# DVC cache and local config
+/.dvc/cache
+/.dvc/tmp
+/.dvc/config.local
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+# END ANSIBLE MANAGED — Playbook 10 (data + dev env)
+*.bak

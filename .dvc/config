@@ -1,0 +1,6 @@
+[core]
+    remote = minio-remote
+['remote "minio-remote"']
+    url = s3://thesis-data/dvc
+    endpointurl = http://localhost:9000
+    use_ssl = false
