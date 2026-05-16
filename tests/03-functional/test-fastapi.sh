@@ -40,7 +40,7 @@ else
 fi
 
 # Test 3: /predict — 21 features, RUL float
-PREDICT_BODY='{"features":[0.0023,-0.0003,100.0,518.67,641.82,1589.7,1400.6,14.62,21.61,554.36,2388.06,9046.19,1.3,47.47,521.66,2388.02,8138.62,8.4195,0.03,392,2388]}'
+PREDICT_BODY='{"features":[0.5,0.3,0.7,0.4,0.2,0.8,0.6,0.5,0.3,0.7,0.4,0.5,0.6,0.2,0.8,0.5]}'
 
 PREDICT=$(kubectl run fapi-p-$$ --rm -i --restart=Never \
   --image=curlimages/curl:8.10.1 --quiet -- \
