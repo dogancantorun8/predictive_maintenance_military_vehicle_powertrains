@@ -25,7 +25,7 @@ spec:
     spec:
       containers:
         - name: fastapi
-          image: thesis/fastapi:0.1.0
+          image: thesis/fastapi:0.2.2
           imagePullPolicy: Never           # Image is locally loaded into k3s
           ports:
             - containerPort: 8000
@@ -38,7 +38,9 @@ spec:
             - name: MODEL_NAME
               value: "cmapss-rul"
             - name: MODEL_STAGE
-              value: "Production"
+              value: "Production"        # legacy fallback
+            - name: MODEL_ALIAS
+              value: "production"        # modern MLflow 2.9+ alias
             - name: STUB_RUL
               value: "125.0"
             # MLflow needs AWS-style env vars to talk to MinIO

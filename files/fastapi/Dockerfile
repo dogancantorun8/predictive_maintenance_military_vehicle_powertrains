@@ -28,11 +28,16 @@ ENV PATH="/opt/venv/bin:$PATH"
 
 # Copy the app code
 COPY --chown=app:app app/ ./app/
+# Model serialization references src.model.LSTMRegressor; bundle it into the image
+# so MLflow can resolve the import path at load time.
+COPY --chown=app:app src/ ./src/
+ENV PYTHONPATH=/home/app:${PYTHONPATH}
 
 # Default env (overridden by Kubernetes manifest)
 ENV PYTHONUNBUFFERED=1 \
     MLFLOW_TRACKING_URI=http://mlflow.mlops.svc.cluster.local:5000 \
     MODEL_NAME=cmapss-rul \
+    MODEL_ALIAS=production \
     MODEL_STAGE=Production \
     STUB_RUL=125.0 \
     MLFLOW_S3_ENDPOINT_URL=http://minio.minio.svc.cluster.local:9000
