@@ -64,3 +64,71 @@ nerdctl_arch: "amd64"
 # from the upstream GitHub release.
 buildkit_version: "0.15.2"
 buildkit_arch: "amd64"
+
+# === Jupyter Lab (development notebook environment) ===
+jupyter_port: 8889                       # 8888 too common, 8889 less crowded
+jupyter_venv: "/root/thesis-infra/.venv"
+jupyter_config_dir: "/root/.jupyter"
+jupyter_notebooks_dir: "/root/thesis-infra/notebooks"
+
+
+# === Port-forward services (centralized list) ===
+# Consumed by scripts/port-forward-all.sh.j2 template.
+# Each entry: name, namespace, resource, local_port, remote_port, type
+# type 'kubectl'  → uses kubectl port-forward (default)
+# type 'ssh-only' → already listening on VM localhost (no kubectl needed)
+port_forward_services:
+  - name: "MinIO Console"
+    namespace: "minio"
+    resource: "minio-console"
+    local_port: 9001
+    remote_port: 9001
+    type: "kubectl"
+  - name: "MinIO S3 API"
+    namespace: "minio"
+    resource: "minio"
+    local_port: 9000
+    remote_port: 9000
+    type: "kubectl"
+  - name: "Kubeflow Pipelines UI"
+    namespace: "kubeflow"
+    resource: "ml-pipeline-ui"
+    local_port: 8080
+    remote_port: 80
+    type: "kubectl"
+  - name: "MLflow"
+    namespace: "mlops"
+    resource: "mlflow"
+    local_port: 5000
+    remote_port: 5000
+    type: "kubectl"
+  - name: "Grafana"
+    namespace: "monitoring"
+    resource: "prometheus-grafana"
+    local_port: 3000
+    remote_port: 80
+    type: "kubectl"
+  - name: "Prometheus"
+    namespace: "monitoring"
+    resource: "prometheus-kube-prometheus-prometheus"
+    local_port: 9090
+    remote_port: 9090
+    type: "kubectl"
+  - name: "Alertmanager"
+    namespace: "monitoring"
+    resource: "prometheus-kube-prometheus-alertmanager"
+    local_port: 9093
+    remote_port: 9093
+    type: "kubectl"
+  - name: "FastAPI"
+    namespace: "mlops"
+    resource: "fastapi"
+    local_port: 8000
+    remote_port: 8000
+    type: "kubectl"
+  - name: "Jupyter Lab"
+    namespace: ""
+    resource: ""
+    local_port: 8889
+    remote_port: 8889
+    type: "ssh-only"

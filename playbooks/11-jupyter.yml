@@ -1,0 +1,138 @@
+---
+# playbooks/11-jupyter.yml
+# Configures Jupyter Lab as a systemd service for ML notebook development.
+#
+# Jupyter is installed by Playbook 10 in the venv; here we add:
+#   - config file (binds to 127.0.0.1:8889)
+#   - notebooks directory
+#   - systemd unit (auto-start on boot)
+#   - regenerate scripts/port-forward-all.sh (Jupyter included automatically)
+#
+# Security: Jupyter listens only on 127.0.0.1. Access is via SSH port-forward
+# (VSCode Remote-SSH handles this transparently). Token auth disabled —
+# the SSH tunnel itself is the security boundary.
+
+- name: Configure Jupyter Lab as systemd service
+  hosts: localhost
+  connection: local
+  become: true
+  vars_files:
+    - ../inventory/group_vars/all.yml
+
+  vars:
+    thesis_repo: "/root/thesis-infra"
+
+  tasks:
+    - name: Verify Jupyter Lab is installed in venv
+      command: "{{ jupyter_venv }}/bin/jupyter --version"
+      register: jupyter_check
+      changed_when: false
+
+    - name: Show Jupyter installed versions
+      debug:
+        var: jupyter_check.stdout_lines
+
+    - name: Create notebooks directory
+      file:
+        path: "{{ jupyter_notebooks_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Create Jupyter config directory
+      file:
+        path: "{{ jupyter_config_dir }}"
+        state: directory
+        mode: '0700'
+
+    - name: Install Jupyter config (with configured port)
+      template:
+        src: "{{ thesis_repo }}/files/jupyter/jupyter_lab_config.py"
+        dest: "{{ jupyter_config_dir }}/jupyter_lab_config.py"
+        mode: '0600'
+
+    # Even though jupyter_lab_config.py has port=8889 hardcoded, we substitute
+    # via template so all.yml's jupyter_port remains the source of truth.
+    - name: Patch Jupyter config to use jupyter_port from all.yml
+      lineinfile:
+        path: "{{ jupyter_config_dir }}/jupyter_lab_config.py"
+        regexp: '^c\.ServerApp\.port'
+        line: "c.ServerApp.port = {{ jupyter_port }}"
+
+    - name: Create Jupyter systemd unit
+      copy:
+        dest: /etc/systemd/system/jupyter-lab.service
+        mode: '0644'
+        content: |
+          [Unit]
+          Description=Jupyter Lab for thesis-infra
+          Documentation=https://jupyter.org
+          After=network.target
+
+          [Service]
+          Type=simple
+          User=root
+          WorkingDirectory={{ thesis_repo }}
+          Environment="PATH={{ jupyter_venv }}/bin:/usr/local/bin:/usr/bin:/bin"
+          Environment="MLFLOW_TRACKING_URI=http://localhost:5000"
+          Environment="MLFLOW_S3_ENDPOINT_URL=http://localhost:9000"
+          ExecStart={{ jupyter_venv }}/bin/jupyter lab \
+            --config={{ jupyter_config_dir }}/jupyter_lab_config.py
+          Restart=on-failure
+          RestartSec=5
+          KillMode=mixed
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Enable and start Jupyter Lab systemd service
+      systemd:
+        name: jupyter-lab
+        daemon_reload: yes
+        enabled: yes
+        state: restarted   # restart in case config changed
+
+    - name: Wait for Jupyter to listen on configured port
+      wait_for:
+        port: "{{ jupyter_port }}"
+        host: 127.0.0.1
+        timeout: 30
+
+    - name: Verify Jupyter is responding
+      uri:
+        url: "http://localhost:{{ jupyter_port }}/lab"
+        return_content: no
+        status_code: 200
+      register: jupyter_response
+
+    - name: Re-render scripts so port-forward-all.sh includes Jupyter
+      template:
+        src: "{{ thesis_repo }}/files/scripts/port-forward-all.sh.j2"
+        dest: "{{ thesis_repo }}/scripts/port-forward-all.sh"
+        mode: '0755'
+
+    - name: Display final summary
+      debug:
+        msg: |
+          Playbook 11 complete.
+
+          Jupyter Lab:     Running on 127.0.0.1:{{ jupyter_port }}
+          Systemd unit:    /etc/systemd/system/jupyter-lab.service
+          Config file:     {{ jupyter_config_dir }}/jupyter_lab_config.py
+          Notebooks dir:   {{ jupyter_notebooks_dir }}
+
+          Helper script regenerated: scripts/port-forward-all.sh
+          (now includes Jupyter Lab on port {{ jupyter_port }})
+
+          To access:
+            ./scripts/port-forward-all.sh restart
+            Browser: http://localhost:{{ jupyter_port }}/lab
+
+          Useful commands:
+            systemctl status jupyter-lab
+            systemctl restart jupyter-lab
+            journalctl -u jupyter-lab -f          # live logs
+
+          Tezde anlamı:
+            "Jupyter Lab is exposed as a systemd-managed service bound
+            to 127.0.0.1:{{ jupyter_port }}. SSH port-forward is the
+            authentication boundary — no token/password is exchanged."
