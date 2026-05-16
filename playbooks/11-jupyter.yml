@@ -18,6 +18,7 @@
   become: true
   vars_files:
     - ../inventory/group_vars/all.yml
+    - ../inventory/group_vars/vault.yml
 
   vars:
     thesis_repo: "/root/thesis-infra"
@@ -75,6 +76,9 @@
           Environment="PATH={{ jupyter_venv }}/bin:/usr/local/bin:/usr/bin:/bin"
           Environment="MLFLOW_TRACKING_URI=http://localhost:5000"
           Environment="MLFLOW_S3_ENDPOINT_URL=http://localhost:9000"
+          Environment="AWS_ACCESS_KEY_ID={{ vault_minio_user }}"
+          Environment="AWS_SECRET_ACCESS_KEY={{ vault_minio_password }}"
+          Environment="AWS_DEFAULT_REGION=us-east-1"
           ExecStart={{ jupyter_venv }}/bin/jupyter lab \
             --config={{ jupyter_config_dir }}/jupyter_lab_config.py
           Restart=on-failure
