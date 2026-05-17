@@ -1,0 +1,4 @@
+# Drift detection CronJob runtime dependencies
+numpy==2.1.2
+scipy==1.14.1
+requests==2.32.3
