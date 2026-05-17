@@ -1,0 +1,85 @@
+---
+# playbooks/12-evidently.yml
+# Evidently drift detection — incremental build.
+#
+# Phase 1 (this commit): generate training-set baseline JSON
+# Phase 2: Evidently container image + drift_check.py
+# Phase 3: Kubernetes CronJob deployment
+# Phase 4: Prometheus integration (drift score metric)
+# Phase 5: Alertmanager rule
+#
+# Each phase adds tasks to this playbook; idempotent — partial runs safe.
+
+- name: Evidently drift detection — incremental deployment
+  hosts: localhost
+  connection: local
+  become: false
+  vars_files:
+    - ../inventory/group_vars/all.yml
+    - ../inventory/group_vars/vault.yml
+  vars:
+    thesis_repo: "/root/thesis-infra"
+    venv_python: "/root/thesis-infra/.venv/bin/python"
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+
+  tasks:
+    # ----------------------------------------------------------------
+    # Phase 1: Generate training baseline JSON
+    # ----------------------------------------------------------------
+    - name: Verify training data exists
+      stat:
+        path: "{{ thesis_repo }}/data/processed/X_train.npy"
+      register: x_train_stat
+
+    - name: Fail if training data missing
+      fail:
+        msg: |
+          Training tensors not found at data/processed/X_train.npy.
+          Run Notebook 02 (preprocessing) first.
+      when: not x_train_stat.stat.exists
+
+    - name: Generate drift detection baseline (training-set prediction distribution)
+      command: "{{ venv_python }} scripts/build_drift_baseline.py"
+      args:
+        chdir: "{{ thesis_repo }}"
+      environment:
+        # MLflow + MinIO credentials sourced from Ansible Vault — never on disk
+        AWS_ACCESS_KEY_ID: "{{ vault_minio_user }}"
+        AWS_SECRET_ACCESS_KEY: "{{ vault_minio_password }}"
+        AWS_DEFAULT_REGION: us-east-1
+        MLFLOW_S3_ENDPOINT_URL: "http://localhost:9000"
+        MLFLOW_TRACKING_URI: "http://localhost:5000"
+        # PyTorch models are serialized with reference to their original
+        # Python import paths (src.model.LSTMRegressor). The drift baseline
+        # script must be able to resolve src/ as a Python package — adding
+        # the repo root to PYTHONPATH does this. Same pattern as the FastAPI
+        # Dockerfile (ENV PYTHONPATH=/home/app:${PYTHONPATH}).
+        PYTHONPATH: "{{ thesis_repo }}"
+      register: baseline_result
+      changed_when: "'Baseline saved to' in baseline_result.stdout"
+
+    - name: Show baseline generation output
+      debug:
+        var: baseline_result.stdout_lines
+
+    - name: Verify baseline.json was created
+      stat:
+        path: "{{ thesis_repo }}/data/drift/baseline.json"
+      register: baseline_stat
+
+    - name: Fail if baseline.json missing
+      fail:
+        msg: "Baseline generation succeeded but baseline.json not found"
+      when: not baseline_stat.stat.exists
+
+    - name: Display baseline file info
+      debug:
+        msg: |
+          ✓ Baseline file ready: {{ thesis_repo }}/data/drift/baseline.json
+            Size: {{ baseline_stat.stat.size }} bytes
+            Will be mounted as ConfigMap in Phase 3 (CronJob deployment).
+
+    # ----------------------------------------------------------------
+    # Phase 2-5: TODO — added in subsequent commits
+    # ----------------------------------------------------------------
