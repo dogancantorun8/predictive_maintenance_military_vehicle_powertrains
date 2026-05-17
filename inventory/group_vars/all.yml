@@ -49,7 +49,7 @@ dvc_remote_url: "s3://thesis-data/dvc"   # Subpath inside thesis-data bucket
 
 # === FastAPI inference service ===
 fastapi_image_name: "thesis/fastapi"
-fastapi_image_tag: "0.2.2"
+fastapi_image_tag: "0.2.3"
 fastapi_namespace: "{{ mlops_namespace }}"
 
 # === nerdctl (containerd-native CLI for image build) ===

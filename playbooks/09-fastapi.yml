@@ -200,7 +200,11 @@
     - name: Apply FastAPI Deployment
       kubernetes.core.k8s:
         state: present
-        src: "{{ thesis_repo }}/files/fastapi/k8s/deployment.yaml"
+        # Use 'template' lookup (not 'file') so Jinja2 syntax like
+        # {{ fastapi_image }} inside deployment.yaml is rendered before
+        # being sent to Kubernetes. Otherwise k8s sees literal "{{...}}"
+        # strings and fails with InvalidImageName.
+        definition: "{{ lookup('template', thesis_repo + '/files/fastapi/k8s/deployment.yaml') | from_yaml }}"
 
     - name: Apply FastAPI Service
       kubernetes.core.k8s:

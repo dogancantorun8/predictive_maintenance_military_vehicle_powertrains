@@ -25,7 +25,7 @@ spec:
     spec:
       containers:
         - name: fastapi
-          image: thesis/fastapi:0.2.2
+          image: "{{ fastapi_image }}"
           imagePullPolicy: Never           # Image is locally loaded into k3s
           ports:
             - containerPort: 8000

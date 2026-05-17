@@ -77,12 +77,21 @@ class ModelHolder:
         """Try to load a Production model from MLflow. Fall back to stub."""
         mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
         try:
-            # Try alias-based loading first (modern MLflow 2.9+)
-            # Fall back to stage-based for backwards compatibility
+            # Two parallel MLflow model identification systems:
+            #   - Aliases (modern, MLflow 2.9+)   — e.g. @production
+            #   - Stages (deprecated)             — e.g. stages=['Production']
+            # Both loading AND version reporting must use the same path,
+            # otherwise alias-loaded model is reported with stage-based
+            # version (the bug we hit in Adim 3 pre-flight check).
+            client = mlflow.tracking.MlflowClient()
+            loaded_via_alias = False
+
             try:
+                # Path A: alias-based (preferred)
                 model_uri = f"models:/{MODEL_NAME}@{MODEL_ALIAS}"
                 self.model = mlflow.pyfunc.load_model(model_uri)
                 log.info(f"Loaded model via alias URI: {model_uri}")
+                loaded_via_alias = True
             except Exception as alias_err:
                 log.warning(
                     f"Alias-based load failed ({alias_err}); "
@@ -91,14 +100,27 @@ class ModelHolder:
                 model_uri = f"models:/{MODEL_NAME}/{MODEL_STAGE}"
                 self.model = mlflow.pyfunc.load_model(model_uri)
                 log.info(f"Loaded model via stage URI: {model_uri}")
-            client = mlflow.tracking.MlflowClient()
-            latest = client.get_latest_versions(MODEL_NAME, stages=[MODEL_STAGE])
-            self.model_version = latest[0].version if latest else "unknown"
+
+            # CRITICAL: report the same version that was loaded.
+            # If alias was used to load, query version via alias too —
+            # NOT via stage (which may return an older version pinned
+            # to the deprecated 'Production' stage label).
+            if loaded_via_alias:
+                mv = client.get_model_version_by_alias(MODEL_NAME, MODEL_ALIAS)
+                self.model_version = mv.version
+                log.info(
+                    "Loaded model '%s' version=%s via @%s alias",
+                    MODEL_NAME, self.model_version, MODEL_ALIAS,
+                )
+            else:
+                latest = client.get_latest_versions(MODEL_NAME, stages=[MODEL_STAGE])
+                self.model_version = latest[0].version if latest else "unknown"
+                log.info(
+                    "Loaded model '%s' version=%s from MLflow stage=%s",
+                    MODEL_NAME, self.model_version, MODEL_STAGE,
+                )
+
             self.is_stub = False
-            log.info(
-                "Loaded model '%s' version=%s from MLflow stage=%s",
-                MODEL_NAME, self.model_version, MODEL_STAGE,
-            )
         except Exception as e:
             log.warning(
                 "Could not load Production model '%s' from MLflow (%s). "
