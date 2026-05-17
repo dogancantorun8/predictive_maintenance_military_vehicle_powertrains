@@ -1,0 +1,60 @@
+# files/monitoring/alertmanager-config.yaml
+# Alertmanager routing configuration — merged into kube-prometheus-stack
+# values under the `alertmanager.config` key.
+#
+# Goal: replace default "null" grouping with semantic alert grouping
+# (by alertname + severity + service). Route ModelDriftDetected alerts
+# specifically; other alerts get a fallback receiver.
+
+global:
+  resolve_timeout: 5m
+
+# Top-level routing tree
+route:
+  # Default grouping — all alerts grouped by alertname, severity, service
+  group_by: ['alertname', 'severity', 'service']
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 12h
+  receiver: 'default-void'
+
+  # Specific routes
+  routes:
+    # Model drift detection — high-priority alert from Evidently CronJob
+    - matchers:
+        - alertname = "ModelDriftDetected"
+      receiver: 'model-drift'
+      group_by: ['alertname', 'model_name', 'baseline_version', 'service']
+      group_wait: 0s
+      group_interval: 1m
+      repeat_interval: 1h
+      continue: true
+
+    # Critical infrastructure alerts (from kube-prometheus-stack rules)
+    - matchers:
+        - severity = "critical"
+      receiver: 'critical-void'
+      group_by: ['alertname', 'namespace']
+      group_wait: 10s
+      group_interval: 5m
+      repeat_interval: 4h
+      continue: true
+
+# Receivers
+# All currently use the "void" pattern (no webhook). In Adim 2D we will
+# replace `model-drift` with a real webhook (Slack, email, or KFP-trigger).
+receivers:
+  - name: 'default-void'
+  - name: 'model-drift'
+  - name: 'critical-void'
+
+# Inhibition rules — silence lower-severity alerts when higher fires
+inhibit_rules:
+  - source_matchers:
+      - severity = "critical"
+    target_matchers:
+      - severity = "warning"
+    equal: ['alertname', 'namespace']
+
+# Templates (none for now; future: custom HTML for Slack/email)
+templates: []
