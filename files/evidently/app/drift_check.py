@@ -221,6 +221,67 @@ def reconstruct_samples_from_histogram(
     return np.array(samples) if samples else np.array([0.0])
 
 
+def ks_from_histograms(
+    baseline_counts: np.ndarray,
+    production_counts: np.ndarray,
+) -> tuple:
+    """
+    Two-sample Kolmogorov-Smirnov test computed directly from histogram
+    bucket counts — no sample reconstruction.
+
+    KS statistic = max |CDF_baseline(x) - CDF_prod(x)| evaluated at each
+    bucket boundary. P-value derived from the two-sample KS distribution
+    (scipy.stats.kstwo) using effective sample size en = sqrt(n1*n2/(n1+n2)).
+
+    This replaces the previous implementation that reconstructed samples
+    at bucket midpoints and called scipy.stats.ks_2samp on them. That
+    approach was systematically biased toward p-value ~ 0 because the
+    reconstructed samples were discrete (all replicas of a few midpoints),
+    violating the continuity assumption of the two-sample KS test.
+
+    See Engineering Challenge 16 in thesis documentation.
+
+    Args:
+        baseline_counts: Per-bucket counts from baseline histogram.
+        production_counts: Per-bucket counts from production histogram.
+
+    Returns:
+        (ks_statistic, p_value) — both floats in [0, 1].
+    """
+    n1 = int(np.sum(baseline_counts))
+    n2 = int(np.sum(production_counts))
+
+    # Edge case: no data on either side — cannot compute, assume no drift
+    if n1 == 0 or n2 == 0:
+        return 0.0, 1.0
+
+    # Empirical CDFs from histogram counts (normalized cumulative sums).
+    # Both CDFs are evaluated at the same bucket boundaries, so we can
+    # compare them point-wise.
+    cdf_baseline = np.cumsum(baseline_counts) / n1
+    cdf_prod = np.cumsum(production_counts) / n2
+
+    # KS statistic: max absolute difference between the two empirical CDFs
+    ks_stat = float(np.max(np.abs(cdf_baseline - cdf_prod)))
+
+    # P-value: effective sample size, then survival function of the
+    # two-sample KS distribution under the null hypothesis.
+    # NOTE: scipy.stats.kstwo.sf() expects an integer-like second argument
+    # (sample count). Float en produces NaN p-values, so we round to int.
+    en = np.sqrt(n1 * n2 / (n1 + n2))
+    en_int = int(round(en))
+    if en_int < 1:
+        # Sample size too small for meaningful KS distribution
+        return ks_stat, 1.0
+    p_value = float(stats.kstwo.sf(ks_stat, en_int))
+
+    # Guard against numerical edge cases (very rare)
+    if not np.isfinite(p_value):
+        p_value = 1.0
+
+    return ks_stat, p_value
+
+
 def compute_ks_test(
     baseline_counts: np.ndarray,
     production_counts: np.ndarray,
@@ -229,16 +290,14 @@ def compute_ks_test(
     """
     Kolmogorov-Smirnov test between baseline and production distributions.
     Returns (statistic, p_value).
+
+    Delegates to ks_from_histograms(), which compares empirical CDFs
+    directly without sample reconstruction. The `buckets` argument is
+    kept in the signature for backward compatibility but is unused by
+    the new implementation (bucket alignment is implicit since both
+    histograms share the same buckets).
     """
-    base_samples = reconstruct_samples_from_histogram(buckets, baseline_counts)
-    prod_samples = reconstruct_samples_from_histogram(buckets, production_counts)
-
-    if len(base_samples) < 2 or len(prod_samples) < 2:
-        log.warning("Insufficient samples for KS test")
-        return 0.0, 1.0
-
-    statistic, p_value = stats.ks_2samp(base_samples, prod_samples)
-    return float(statistic), float(p_value)
+    return ks_from_histograms(baseline_counts, production_counts)
 
 
 # ----------------------------------------------------------------------

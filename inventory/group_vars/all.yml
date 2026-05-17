@@ -144,5 +144,5 @@ evidently_namespace: monitoring
 pushgateway_chart_version: "2.15.0"
 pushgateway_release_name: prometheus-pushgateway
 evidently_image_name: "thesis/evidently-drift"
-evidently_image_tag: "0.1.1"
+evidently_image_tag: "0.1.4"
 evidently_image: "{{ evidently_image_name }}:{{ evidently_image_tag }}"
