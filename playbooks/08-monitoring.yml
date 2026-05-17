@@ -54,6 +54,53 @@
           grafana:
             adminPassword: "{{ vault_grafana_password }}"
 
+    - name: Install prometheus-pushgateway (separate release for CronJob metrics)
+      # kube-prometheus-stack does not include pushgateway as a subchart.
+      # The Evidently drift-check CronJob (Playbook 12) is a short-lived
+      # workload that Prometheus cannot scrape directly — it pushes its
+      # metrics to this gateway instead, which Prometheus then scrapes.
+      # ServiceMonitor is enabled so kube-prometheus-stack's Prometheus
+      # operator auto-discovers it (cluster-wide ServiceMonitor discovery
+      # is enabled in kube-prometheus-stack-values.yaml).
+      kubernetes.core.helm:
+        name: "{{ pushgateway_release_name }}"
+        chart_ref: prometheus-community/prometheus-pushgateway
+        chart_version: "{{ pushgateway_chart_version }}"
+        release_namespace: "{{ monitoring_namespace }}"
+        create_namespace: false
+        wait: true
+        wait_timeout: 5m
+        values:
+          service:
+            type: ClusterIP
+            port: 9091
+          serviceMonitor:
+            enabled: true
+            namespace: "{{ monitoring_namespace }}"
+          replicaCount: 1
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+          # Persist pushed metrics across restarts (small, helps reliability)
+          persistentVolume:
+            enabled: true
+            storageClass: local-path
+            size: 1Gi
+
+    - name: Wait for Pushgateway pod to be Ready
+      shell: |
+        kubectl get pods -n {{ monitoring_namespace }} -l app.kubernetes.io/name=prometheus-pushgateway \
+          -o jsonpath='{.items[0].status.conditions[?(@.type=="Ready")].status}'
+      register: pushgw_ready
+      until: pushgw_ready.stdout == "True"
+      retries: 30
+      delay: 5
+      changed_when: false
+
     - name: Wait for Prometheus pod to be Ready
       shell: |
         kubectl get pods -n {{ monitoring_namespace }} -l app.kubernetes.io/name=prometheus \

@@ -132,3 +132,18 @@ port_forward_services:
     local_port: 8889
     remote_port: 8889
     type: "ssh-only"
+# ============================================================
+# Evidently drift detection (Playbook 12)
+# ============================================================
+evidently_namespace: monitoring
+
+# === Prometheus Pushgateway (Playbook 08 — for CronJob metrics) ===
+# kube-prometheus-stack does not include pushgateway as a subchart;
+# it is installed as a separate Helm release. Required by Evidently
+# drift-check CronJob (Playbook 12) to push metrics from short-lived
+# pods that Prometheus cannot scrape directly.
+pushgateway_chart_version: "2.15.0"
+pushgateway_release_name: prometheus-pushgateway
+evidently_image_name: "thesis/evidently-drift"
+evidently_image_tag: "0.1.0"
+evidently_image: "{{ evidently_image_name }}:{{ evidently_image_tag }}"
